@@ -575,7 +575,7 @@
         <p>If the full lock-free MVMemory proves too complex, we fall back to fine-grained locking (one lock per key, not a global lock). This still preserves the core Block-STM algorithm and allows meaningful scaling and contention analysis, while being simpler to implement correctly.</p>
 
         <h2>Platform Choice</h2>
-        <p>GHC machines provide 8-core CPUs suitable for evaluating thread scaling from 1 to 8, and NVIDIA GPUs for the stretch goal. C++20 is chosen for <code>std::atomic</code> with memory ordering control, <code>std::atomic&lt;std::shared_ptr&gt;</code>, and low-level control over memory layout. OpenMP provides a straightforward thread pool without the boilerplate of raw pthreads.</p>
+        <p>GHC machines provide 8-core CPUs suitable for evaluating thread scaling from 1 to 8, and NVIDIA GPUs for the stretch goal. C++20 is chosen for <code>std::atomic</code> with explicit memory ordering control and low-level control over memory layout. OpenMP provides a straightforward thread pool without the boilerplate of raw pthreads.</p>
 
         <h2>Evaluation Plan</h2>
         <h3>Scaling Experiments</h3>

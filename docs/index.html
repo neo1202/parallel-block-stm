@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Parallel Block-STM</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:ital,wght@0,400;0,600;0,700;1,400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0e1117;
+    --surface: #161b22;
+    --surface-2: #1c2129;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --accent-dim: #1f3a5f;
+    --green: #3fb950;
+    --green-dim: #1a3a2a;
+    --orange: #d29922;
+    --orange-dim: #3d2e10;
+    --red: #f85149;
+    --red-dim: #3d1a18;
+    --purple: #bc8cff;
+    --purple-dim: #3b2d5e;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Source Serif 4', Georgia, serif;
+    line-height: 1.7;
+    min-height: 100vh;
+  }
+
+  .site-header {
+    border-bottom: 1px solid var(--border);
+    padding: 2rem 0;
+    background: linear-gradient(180deg, #131820 0%, var(--bg) 100%);
+  }
+
+  .container {
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 0 2rem;
+  }
+
+  .header-content {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+  }
+
+  .project-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: -0.02em;
+  }
+
+  .project-subtitle {
+    font-size: 0.95rem;
+    color: var(--text-dim);
+    margin-top: 0.3rem;
+  }
+
+  .course-tag {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+    color: var(--accent);
+    background: var(--accent-dim);
+    padding: 0.25rem 0.6rem;
+    border-radius: 4px;
+    letter-spacing: 0.02em;
+  }
+
+  .github-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.82rem;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    text-decoration: none;
+    transition: border-color 0.2s, background 0.2s;
+  }
+
+  .github-btn:hover {
+    border-color: var(--accent);
+    background: var(--surface-2);
+  }
+
+  .github-btn svg { width: 18px; height: 18px; fill: var(--text); }
+
+  .tabs-container {
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+
+  .tabs {
+    display: flex;
+    gap: 0;
+    overflow-x: auto;
+  }
+
+  .tab {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.82rem;
+    color: var(--text-dim);
+    padding: 0.85rem 1.25rem;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: color 0.2s, border-color 0.2s;
+    white-space: nowrap;
+    user-select: none;
+    background: none;
+    border-top: none;
+    border-left: none;
+    border-right: none;
+  }
+
+  .tab:hover { color: var(--text); }
+
+  .tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+
+  .content { padding: 2.5rem 0 4rem; }
+
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  .overview-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-top: 1.5rem;
+  }
+
+  @media (max-width: 640px) { .overview-grid { grid-template-columns: 1fr; } }
+
+  .info-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.25rem 1.5rem;
+  }
+
+  .info-card.full { grid-column: 1 / -1; }
+
+  .card-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    margin-bottom: 0.5rem;
+  }
+
+  .card-value {
+    font-size: 1rem;
+    color: var(--text);
+  }
+
+  .tech-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-top: 0.5rem;
+  }
+
+  .badge {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    padding: 0.2rem 0.55rem;
+    border-radius: 4px;
+    border: 1px solid;
+  }
+
+  .badge.cpp { color: var(--orange); border-color: var(--orange-dim); background: rgba(210,153,34,0.08); }
+  .badge.openmp { color: var(--accent); border-color: var(--accent-dim); background: rgba(88,166,255,0.08); }
+  .badge.atomic { color: var(--green); border-color: var(--green-dim); background: rgba(63,185,80,0.08); }
+  .badge.cuda { color: var(--purple); border-color: var(--purple-dim); background: rgba(188,140,255,0.08); }
+
+  .arch-diagram {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.5rem;
+    margin-top: 1.5rem;
+    overflow-x: auto;
+  }
+
+  .arch-diagram pre {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem;
+    line-height: 1.5;
+    color: var(--text-dim);
+  }
+
+  .prose h2 {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--text);
+    margin-top: 2.5rem;
+    margin-bottom: 0.75rem;
+    padding-bottom: 0.4rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .prose h2:first-child { margin-top: 0; }
+
+  .prose h3 {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text);
+    margin-top: 1.8rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .prose p {
+    margin-bottom: 1rem;
+    color: var(--text);
+    font-size: 0.95rem;
+  }
+
+  .prose ul, .prose ol {
+    margin-bottom: 1rem;
+    padding-left: 1.5rem;
+  }
+
+  .prose li {
+    margin-bottom: 0.4rem;
+    font-size: 0.95rem;
+  }
+
+  .prose strong { color: var(--text); font-weight: 600; }
+
+  .prose code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.82rem;
+    background: var(--surface-2);
+    padding: 0.15rem 0.4rem;
+    border-radius: 3px;
+    color: var(--accent);
+  }
+
+  .prose pre {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1.25rem;
+    overflow-x: auto;
+    margin-bottom: 1rem;
+  }
+
+  .prose pre code {
+    background: none;
+    padding: 0;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    line-height: 1.6;
+  }
+
+  .prose table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 1.5rem;
+    font-size: 0.88rem;
+  }
+
+  .prose th {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    text-align: left;
+    padding: 0.6rem 0.8rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .prose td {
+    padding: 0.55rem 0.8rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+
+  .prose tr:last-child td { border-bottom: none; }
+
+  .status {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    padding: 0.15rem 0.45rem;
+    border-radius: 3px;
+  }
+
+  .status.done { color: var(--green); background: var(--green-dim); }
+  .status.wip { color: var(--orange); background: var(--orange-dim); }
+  .status.todo { color: var(--text-dim); background: var(--surface-2); }
+
+  .placeholder {
+    text-align: center;
+    padding: 4rem 2rem;
+    color: var(--text-dim);
+  }
+
+  .placeholder-icon {
+    font-size: 2.5rem;
+    margin-bottom: 1rem;
+    opacity: 0.4;
+  }
+
+  .placeholder p {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85rem;
+  }
+
+  .site-footer {
+    border-top: 1px solid var(--border);
+    padding: 1.5rem 0;
+    text-align: center;
+  }
+
+  .site-footer p {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    color: var(--text-dim);
+  }
+</style>
+</head>
+<body>
+
+<!-- ════════ HEADER ════════ -->
+<header class="site-header">
+  <div class="container">
+    <div class="header-content">
+      <div>
+        <div class="project-title">Parallel Block-STM</div>
+        <div class="project-subtitle">Speculative parallel transaction execution engine with lock-free multi-version memory</div>
+        <div style="margin-top: 0.6rem;">
+          <span class="course-tag">15-418/618 Spring 2026</span>
+        </div>
+      </div>
+      <a href="https://github.com/neo1202/parallel-block-stm" target="_blank" class="github-btn">
+        <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        Source Code
+      </a>
+    </div>
+  </div>
+</header>
+
+<!-- ════════ TABS ════════ -->
+<nav class="tabs-container">
+  <div class="container">
+    <div class="tabs">
+      <button class="tab active" data-tab="overview">Overview</button>
+      <button class="tab" data-tab="proposal">Proposal</button>
+      <button class="tab" data-tab="milestone">Milestone</button>
+      <button class="tab" data-tab="report">Final Report</button>
+    </div>
+  </div>
+</nav>
+
+<!-- ════════ CONTENT ════════ -->
+<main class="content">
+  <div class="container">
+
+    <!-- ──── OVERVIEW ──── -->
+    <div class="tab-panel active" id="overview">
+      <div class="prose">
+        <p>We implement the <strong>Block-STM</strong> algorithm (Gelashvili et al., PPoPP 2023) — the parallel execution engine behind the Aptos blockchain — in C++. Given a block of N ordered transactions, our engine speculatively executes them in parallel across multiple threads, dynamically detects read/write conflicts at runtime, aborts and re-executes conflicting transactions via cascading rollback, and guarantees the final state is identical to sequential execution in the preset order. The core data structure is a lock-free multi-version memory store where each key maintains a version chain accessed concurrently by all threads using <code>std::atomic</code> operations. We evaluate scaling behavior across thread counts and contention levels, and analyze abort rates, cache behavior, and the overhead of optimistic concurrency control.</p>
+      </div>
+
+      <div class="overview-grid">
+        <div class="info-card">
+          <div class="card-label">Team</div>
+          <div class="card-value">
+            Hua-Yo Wu (huayow) <br> Pi-Jung Chang (pijungc)
+          </div>
+        </div>
+        <div class="info-card">
+          <div class="card-label">Platform</div>
+          <div class="card-value">
+            GHC machines<br>
+            <span style="color: var(--text-dim); font-size: 0.85rem;">Multi-core CPUs (Intel i7-9700, 8 cores) + NVIDIA RTX 2080 GPU for stretch goal</span>
+          </div>
+        </div>
+        <div class="info-card full">
+          <div class="card-label">Technologies</div>
+          <div class="tech-badges">
+            <span class="badge cpp">C++20</span>
+            <span class="badge openmp">OpenMP</span>
+            <span class="badge atomic">std::atomic / Lock-Free</span>
+            <span class="badge cuda">CUDA (stretch)</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="arch-diagram">
+        <div class="card-label" style="margin-bottom: 0.75rem;">System Architecture</div>
+<pre>
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │                    Collaborative Scheduler                         │
+  │                                                                     │
+  │  Shared atomic counters:  execution_idx  |  validation_idx          │
+  │                                                                     │
+  │  ┌─── Thread 0 ───┐  ┌─── Thread 1 ───┐       ┌─── Thread N ───┐  │
+  │  │  1. get task    │  │  1. get task    │  ...  │  1. get task    │  │
+  │  │  2. execute     │  │  2. execute     │       │  2. execute     │  │
+  │  │  3. validate    │  │  3. validate    │       │  3. validate    │  │
+  │  │  4. abort/commit│  │  4. abort/commit│       │  4. abort/commit│  │
+  │  └────────┬────────┘  └────────┬────────┘       └────────┬────────┘  │
+  │           │                    │                          │          │
+  │           ▼                    ▼                          ▼          │
+  │  ┌──────────────────────────────────────────────────────────────┐   │
+  │  │              Multi-Version Data Store (MVMemory)             │   │
+  │  │                                                              │   │
+  │  │  Key A: ─── [v1: Tx₁ wrote 100] ── [v3: Tx₃ wrote 250] ──  │   │
+  │  │  Key B: ─── [v2: Tx₂ wrote 50]  ── [ESTIMATE: Tx₅ ...]  ── │   │
+  │  │  Key C: ─── [v1: Tx₁ wrote 300] ──────────────────────────  │   │
+  │  │                                                              │   │
+  │  │  Lock-free version chains · std::atomic CAS operations       │   │
+  │  └──────────────────────────────────────────────────────────────┘   │
+  └─────────────────────────────────────────────────────────────────────┘
+
+  Transaction lifecycle:    ReadyToExecute ──► Executing ──► Validated ──► Committed
+                                   ▲                            │
+                                   └──── Aborted ◄──────────────┘
+                                      (conflict detected)
+</pre>
+      </div>
+
+      <div style="margin-top: 2rem;">
+        <div class="card-label" style="margin-bottom: 0.75rem;">Project Timeline</div>
+        <table class="prose" style="margin: 0;">
+          <thead>
+            <tr>
+              <th>Week</th>
+              <th>Task</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="white-space:nowrap;">Week 1 <span style="color:var(--text-dim); font-size:0.8rem;">(3/26–4/3)</span></td>
+              <td>Workload generator + sequential baseline + MVMemory data structure + proposal</td>
+              <td><span class="status wip">in progress</span></td>
+            </tr>
+            <tr>
+              <td style="white-space:nowrap;">Week 2 <span style="color:var(--text-dim); font-size:0.8rem;">(4/4–4/10)</span></td>
+              <td>Collaborative scheduler + speculative execution + validation + abort logic</td>
+              <td><span class="status todo">todo</span></td>
+            </tr>
+            <tr>
+              <td style="white-space:nowrap;">Week 3 <span style="color:var(--text-dim); font-size:0.8rem;">(4/11–4/15)</span></td>
+              <td>Integration + correctness testing (sequential equivalence) + ESTIMATE marker optimization + milestone report</td>
+              <td><span class="status todo">todo</span></td>
+            </tr>
+            <tr>
+              <td style="white-space:nowrap;">Week 4 <span style="color:var(--text-dim); font-size:0.8rem;">(4/16–4/22)</span></td>
+              <td>Performance experiments: scaling study, contention sweep, abort rate analysis, cache profiling with perf</td>
+              <td><span class="status todo">todo</span></td>
+            </tr>
+            <tr>
+              <td style="white-space:nowrap;">Week 5 <span style="color:var(--text-dim); font-size:0.8rem;">(4/23–4/30)</span></td>
+              <td>CUDA stretch goal + final benchmarks + final report + poster</td>
+              <td><span class="status todo">todo</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ──── PROPOSAL ──── -->
+    <div class="tab-panel" id="proposal">
+      <div class="prose">
+
+        <h2>Summary</h2>
+        <p>We implement the <strong>Block-STM</strong> algorithm — a parallel execution engine for ordered transactions built on Software Transactional Memory principles — in C++ with OpenMP. Given a block of N transactions with a preset sequential order, our engine speculatively executes them in parallel, detects read/write conflicts at runtime through a validation phase, and aborts and re-executes conflicting transactions while guaranteeing the final result is identical to sequential execution. The core challenge is building a <strong>lock-free multi-version data store</strong> and a <strong>collaborative scheduler</strong> that coordinates speculative execution, validation, and cascading aborts using <code>std::atomic</code> operations. Our primary goal is to characterize speedup, abort rates, and cache behavior across varying thread counts and contention levels.</p>
+
+        <h2>Background</h2>
+
+        <h3>The Problem: Parallel Execution with Preset Order</h3>
+        <p>In systems like blockchains, a block contains N ordered transactions (T₁, T₂, ..., Tₙ) that must be executed such that the final state matches strictly sequential execution in that order. The naive approach — execute them one by one — is safe but slow. The challenge is: <em>how do we execute transactions in parallel without knowing their dependencies upfront, while guaranteeing the result is identical to sequential execution?</em></p>
+
+        <p>This is a well-studied problem in the database and transactional memory literature. Block-STM (Gelashvili et al., PPoPP 2023) solves it using <strong>optimistic concurrency control</strong>: execute first, validate later, abort and retry on conflict. The key insight is that the preset order — often seen as a constraint — is actually a performance blessing, because it eliminates the need for complex serialization ordering that general-purpose STM libraries must handle.</p>
+
+        <h3>Algorithm Overview</h3>
+        <p>Block-STM operates in a continuous loop across all worker threads. Each thread repeatedly picks the next available task (either an execution or a validation) from a shared scheduler:</p>
+
+        <p><strong>Phase 1 — Speculative Execution:</strong> A thread picks transaction Tₖ and executes it against the multi-version data store (MVMemory). For each read, the thread finds the most recent version written by a transaction with ID &lt; k. The read location and version are recorded in Tₖ's read-set. Write results go into Tₖ's write-set and are published to MVMemory tagged with version k.</p>
+
+        <p><strong>Phase 2 — Validation:</strong> After execution, Tₖ enters validation. The system re-checks every entry in Tₖ's read-set: has any other transaction written a newer version to that location since Tₖ read it? If yes, Tₖ read stale data — it must be aborted.</p>
+
+        <p><strong>Phase 3 — Abort &amp; Re-execution:</strong> When Tₖ is aborted, its writes in MVMemory are replaced with <code>ESTIMATE</code> markers (not deleted). Any later transaction Tⱼ (j &gt; k) that attempts to read a location and encounters an <code>ESTIMATE</code> marker knows it has a dependency on a transaction currently being re-executed — it suspends rather than reading stale data and getting aborted later. This dramatically reduces cascading aborts. Aborted transactions are re-queued with priority given to lower-ID transactions to guarantee progress and prevent livelocks.</p>
+
+        <p><strong>Commit:</strong> The entire block commits atomically once all transactions have been validated and no ongoing execution or validation tasks remain.</p>
+
+        <h3>Multi-Version Data Store (MVMemory)</h3>
+        <p>MVMemory is a concurrent hash map where each key maps to a <strong>version chain</strong> — a sorted list of <code>(tx_id, value)</code> entries. The core operations are:</p>
+        <ul>
+          <li><code>write(location, tx_id, value)</code>: Insert or update the entry for <code>tx_id</code> in the version chain.</li>
+          <li><code>read(location, tx_id)</code>: Find the entry with the largest <code>tx_id &lt; k</code>. If the entry is an <code>ESTIMATE</code> marker, return <code>READ_ERROR</code> (dependency detected). If no entry exists, fall back to the pre-block storage snapshot.</li>
+        </ul>
+        <p>Both operations must be safe under concurrent access from all threads without coarse-grained locking.</p>
+
+        <h3>Why is this suitable for parallelism?</h3>
+        <p>Under low-contention workloads (transactions touching mostly disjoint memory locations), almost all speculative executions succeed validation on the first try, yielding near-linear speedup. Under high contention, the ESTIMATE marker mechanism and priority-based scheduling keep abort rates manageable. The algorithm dynamically discovers and exploits whatever parallelism exists in the workload — no static dependency analysis is required.</p>
+
+        <h2>The Challenge</h2>
+
+        <p><strong>Dynamic conflict detection:</strong> Unlike static work decomposition (e.g., tiling an image), conflicts between transactions are unknown until runtime. A transaction's read-set depends on the values it reads, which depend on what earlier transactions wrote, which may themselves be speculative. This creates a chain of dynamic dependencies that must be resolved correctly under concurrency.</p>
+
+        <p><strong>Lock-free multi-version data store:</strong> MVMemory is the central shared data structure accessed by every thread on every read and write. Using mutexes would serialize access and destroy scalability. We implement version chain operations using <code>std::atomic</code> compare-and-swap (CAS) loops, which requires careful reasoning about ABA problems, memory ordering (<code>memory_order_acquire</code>/<code>release</code>/<code>seq_cst</code>), and correctness under relaxed consistency.</p>
+
+        <p><strong>Cascading aborts:</strong> When transaction Tₖ is aborted and re-executed, its new writes may differ from the old ones. Every transaction Tⱼ (j &gt; k) that read Tₖ's old output must also be aborted. In the worst case, a single abort at T₁ can cascade through the entire block. The ESTIMATE marker mechanism mitigates this by converting "abort after wasted execution" into "suspend before wasted execution," but implementing this correctly — especially the transition from ESTIMATE back to a real value after re-execution, and waking up suspended threads — involves subtle synchronization.</p>
+
+        <p><strong>Livelock prevention:</strong> Without careful scheduling, two transactions can repeatedly abort each other: T₅ aborts T₈ which re-executes and aborts T₅ in a cycle. Block-STM prevents this by always prioritizing lower-ID transactions for re-execution and ensuring that a re-executing transaction can only be aborted by a transaction with a strictly lower ID. Implementing this priority scheme correctly in the scheduler using only atomic operations is non-trivial.</p>
+
+        <p><strong>Cache behavior:</strong> The multi-version data store is a pointer-heavy structure (hash map → version chains → entries) with poor spatial locality. Under high concurrency, false sharing on adjacent version chain entries and on the scheduler's atomic counters can degrade performance. We plan to analyze this with <code>perf</code> and explore cache-line padding and memory layout optimizations.</p>
+
+        <h2>Resources</h2>
+        <p><strong>Hardware:</strong> GHC machines — Intel i7-9700 (8 cores), NVIDIA RTX 2080 GPU (for stretch goal), 16 GB RAM.</p>
+        <p><strong>Software:</strong> C++20, OpenMP, CUDA toolkit (stretch goal), <code>perf</code> for cache profiling.</p>
+        <p><strong>Code base:</strong> Starting from scratch — no existing codebase.</p>
+
+        <h3>References</h3>
+        <p>[1] Gelashvili, Spiegelman, Xiang, et al. "Block-STM: Scaling Blockchain Execution by Turning Ordering Curse to a Performance Blessing." PPoPP, 2023. (Core implementation reference — Section 3 contains pseudocode for the scheduler, MVMemory, and validation logic.)<br>
+        [2] Shavit, Touitou. "Software Transactional Memory." PODC, 1995. (Foundational STM paper — Block-STM adapts OCC principles from this work to the deterministic, preset-order setting.)<br>
+        [3] Cooper et al. "Benchmarking Cloud Serving Systems with YCSB." SoCC, 2010. (Workload generation methodology.)</p>
+
+        <h2>Goals and Deliverables</h2>
+        <h3>Plan to Achieve (MVP)</h3>
+        <ol>
+          <li><strong>Sequential baseline:</strong> Execute all N transactions in order. This is the correctness reference and performance baseline.</li>
+          <li><strong>Workload generator:</strong> Synthetic transaction generator with tunable parameters: block size (1K–100K transactions), number of memory locations (accounts), read/write set sizes, and compute intensity. Contention is controlled by the ratio of transactions to accounts (2 accounts = nearly sequential; 10K accounts = nearly independent).</li>
+          <li><strong>Multi-version data store (MVMemory):</strong> Lock-free concurrent hash map with version chains. Support <code>read</code>, <code>write</code>, and <code>ESTIMATE</code> marker operations using <code>std::atomic</code> CAS.</li>
+          <li><strong>Collaborative scheduler:</strong> Shared atomic counters for execution and validation index. Dynamic task assignment: each thread atomically increments the appropriate counter to claim the next task. Priority-based re-execution for aborted transactions.</li>
+          <li><strong>Speculative execution + validation + abort:</strong> Full Block-STM loop: execute → record read/write sets → validate → abort with ESTIMATE markers or commit. Cascading abort propagation.</li>
+          <li><strong>Correctness verification:</strong> Automated comparison of parallel execution output against sequential baseline for every test case.</li>
+          <li><strong>Performance evaluation:</strong>
+            <ul>
+              <li>Scaling study: 1, 2, 4, 8 threads × 5 contention levels (2, 10, 100, 1K, 10K accounts)</li>
+              <li>Throughput (transactions/sec) and speedup curves</li>
+              <li>Abort rate and cascading abort depth vs. contention</li>
+              <li>Cache miss analysis with <code>perf</code> (L1/L2 miss rates, false sharing detection)</li>
+            </ul>
+          </li>
+        </ol>
+
+        <h3>Hope to Achieve (Stretch Goals)</h3>
+        <ol start="8">
+          <li><strong>CUDA port:</strong> Map speculative execution to GPU — one thread per transaction. Analyze why GPU is suboptimal for this workload: warp divergence from abort/retry branching, global memory contention on MVMemory, lack of efficient cross-warp synchronization for the collaborative scheduler. Quantify GPU vs CPU throughput across contention levels.</li>
+          <li><strong>Cache-line padding optimization:</strong> Pad version chain entries and atomic counters to eliminate false sharing; measure the impact on throughput.</li>
+          <li><strong>Dependency-aware scheduling:</strong> After first execution round, use observed read/write sets to build a dependency graph and pre-schedule independent transactions, reducing abort rates on subsequent blocks with similar access patterns.</li>
+        </ol>
+
+        <h3>Fallback Plan</h3>
+        <p>If the full lock-free MVMemory proves too complex, we fall back to fine-grained locking (one lock per key, not a global lock). This still preserves the core Block-STM algorithm and allows meaningful scaling and contention analysis, while being simpler to implement correctly.</p>
+
+        <h2>Platform Choice</h2>
+        <p>GHC machines provide 8-core CPUs suitable for evaluating thread scaling from 1 to 8, and NVIDIA GPUs for the stretch goal. C++20 is chosen for <code>std::atomic</code> with memory ordering control, <code>std::atomic&lt;std::shared_ptr&gt;</code>, and low-level control over memory layout. OpenMP provides a straightforward thread pool without the boilerplate of raw pthreads.</p>
+
+        <h2>Evaluation Plan</h2>
+        <h3>Scaling Experiments</h3>
+        <table>
+          <thead><tr><th>Experiment</th><th>Configuration</th><th>Key Metric</th></tr></thead>
+          <tbody>
+            <tr><td>Thread scaling</td><td>1, 2, 4, 8 threads; block = 10K txns; accounts = 1K (medium contention)</td><td>Throughput (txn/sec), speedup</td></tr>
+            <tr><td>Contention sweep</td><td>8 threads; block = 10K txns; accounts = 2, 10, 100, 1K, 10K</td><td>Throughput, abort rate, cascading abort depth</td></tr>
+            <tr><td>Block size scaling</td><td>8 threads; block = 1K, 5K, 10K, 50K, 100K; accounts = 1K</td><td>Throughput, scheduler overhead</td></tr>
+            <tr><td>Cache analysis</td><td>8 threads; block = 10K; accounts = 100 (high contention)</td><td>L1/L2 cache miss rate, false sharing (perf c2c)</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Correctness Tests</h3>
+        <table>
+          <thead><tr><th>Test</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td>Zero-contention</td><td>10K transactions on 10K disjoint accounts — parallel result must match sequential</td></tr>
+            <tr><td>Full-contention</td><td>10K transactions on 2 accounts — effectively sequential, tests abort/retry correctness</td></tr>
+            <tr><td>Mixed workload</td><td>Realistic read/write patterns with varying hot-spot ratios</td></tr>
+            <tr><td>Determinism</td><td>Run same block 100 times — output must be bit-identical every time</td></tr>
+          </tbody>
+        </table>
+
+        <h2>Schedule</h2>
+        <table>
+          <thead><tr><th>Week</th><th>Dates</th><th>Tasks</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td>3/26–4/3</td><td>Workload generator (tunable contention) + sequential baseline + MVMemory data structure (lock-free version chains with std::atomic CAS). Submit proposal.</td></tr>
+            <tr><td>2</td><td>4/4–4/10</td><td>Collaborative scheduler (atomic counters, task dispatch, priority re-execution). Speculative execution + validation + abort logic with ESTIMATE markers.</td></tr>
+            <tr><td>3</td><td>4/11–4/15</td><td>Integration + correctness testing (sequential equivalence). ESTIMATE optimization + livelock prevention. <strong>Milestone report (due 4/14).</strong></td></tr>
+            <tr><td>4</td><td>4/16–4/22</td><td>Performance experiments: scaling study, contention sweep, abort rate analysis. Cache profiling with perf.</td></tr>
+            <tr><td>5</td><td>4/23–4/30</td><td>CUDA stretch goal (GPU speculative execution). Final benchmarks + final report + poster.</td></tr>
+          </tbody>
+        </table>
+
+      </div>
+    </div>
+
+    <!-- ──── MILESTONE ──── -->
+    <div class="tab-panel" id="milestone">
+      <div class="placeholder">
+        <div class="placeholder-icon">&#9671;</div>
+        <p>Milestone report will be posted here after April 14th.</p>
+      </div>
+    </div>
+
+    <!-- ──── FINAL REPORT ──── -->
+    <div class="tab-panel" id="report">
+      <div class="placeholder">
+        <div class="placeholder-icon">&#9671;</div>
+        <p>Final report will be posted here after April 30th.</p>
+      </div>
+    </div>
+
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    <p>15-418/618 Parallel Computer Architecture and Programming · Carnegie Mellon University · Spring 2026</p>
+  </div>
+</footer>
+
+<script>
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById(tab.dataset.tab).classList.add('active');
+    });
+  });
+
+  if (window.location.hash) {
+    const target = window.location.hash.slice(1);
+    const tab = document.querySelector(`[data-tab="${target}"]`);
+    if (tab) tab.click();
+  }
+</script>
+
+</body>
+</html>

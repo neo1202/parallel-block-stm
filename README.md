@@ -12,38 +12,22 @@ Parallel speculative transaction execution engine implementing the Block-STM alg
 
 ## Overview
 
-Given a block of N ordered transactions, this engine speculatively executes them in parallel across multiple threads, detects read/write conflicts at runtime, aborts and re-executes conflicting transactions via cascading rollback, and guarantees the final state is identical to sequential execution in the preset order.
+Given a block of N ordered transactions, the engine executes them speculatively in parallel across threads, detects read/write conflicts, aborts and re-executes conflicting transactions, and guarantees the final state matches sequential execution in the given order.
 
-The core data structure is a **lock-free multi-version data store (MVMemory)** where each key maintains a version chain accessed concurrently by all threads using `std::atomic` CAS operations. A **collaborative scheduler** coordinates speculative execution, validation, and abort tasks through shared atomic counters, with an **ESTIMATE marker** mechanism that converts wasted aborts into informed dependency waits.
+Two pieces do most of the work:
 
-## Architecture
+- `MVMemory` - a multi-version store. Each key keeps a version chain (lock-free sorted linked list, CAS insert, exponential backoff under contention). Readers find the highest write from a tx with idx less than theirs.
+- `Scheduler` - a collaborative scheduler with two shared atomic counters (`execution_idx`, `validation_idx`). Any thread can grab any task; aborted tx's become `ESTIMATE` markers so readers suspend instead of reading stale data.
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                 Collaborative Scheduler                  │
-│   Shared atomic counters: execution_idx | validation_idx │
-│                                                          │
-│   Thread 0        Thread 1        ...        Thread N    │
-│   ┌──────────┐   ┌──────────┐              ┌──────────┐ │
-│   │ execute  │   │ execute  │              │ execute  │ │
-│   │ validate │   │ validate │              │ validate │ │
-│   │ abort?   │   │ abort?   │              │ abort?   │ │
-│   └────┬─────┘   └────┬─────┘              └────┬─────┘ │
-│        │              │                         │        │
-│        ▼              ▼                         ▼        │
-│   ┌──────────────────────────────────────────────────┐   │
-│   │          Multi-Version Data Store (MVMemory)      │   │
-│   │                                                    │   │
-│   │  Key -> version chain: [(tx_id, value), ...]        │   │
-│   │  Lock-free CAS · ESTIMATE markers · snapshot reads │   │
-│   └──────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────┘
+### Transaction status
 
-Transaction lifecycle:
-  ReadyToExecute -> Executing -> Validated -> Committed
-        ↑                          │
-        └──── Aborted (conflict) ──┘
-```
+Each `(txn_idx, incarnation)` transitions through:
+
+- `READY_TO_EXECUTE(i)` -> `EXECUTING(i)` via `try_incarnate()`
+- `EXECUTING(i)` -> `EXECUTED(i)` via `finish_execution()`
+- `EXECUTING(i)` -> `ABORTING(i)` via `add_dependency()` when a read hits an ESTIMATE
+- `EXECUTED(i)` -> `ABORTING(i)` via `try_validation_abort()` (first caller wins)
+- `ABORTING(i)` -> `READY_TO_EXECUTE(i+1)` via `set_ready_status()`
 
 ## Building
 
@@ -55,43 +39,14 @@ make -j$(nproc)
 
 ### Dependencies
 
-- C++20 compiler (g++ 10+)
-- OpenMP
-- CUDA Toolkit 11+ (stretch goal)
+- C++20 compiler (g++ 10+ / clang 13+ / AppleClang)
+- CMake 3.20+
 
 ## Usage
 
 ```bash
-# Run correctness tests
-./build/test_blockstm
-
-# Run benchmarks
-./build/bench_scaling --threads 8 --block-size 10000 --accounts 1000
-./build/bench_contention --threads 8 --accounts 2,10,100,1000,10000
-```
-
-## Project Structure
-
-```
-parallel-block-stm/
-├── docs/                    # GitHub Pages project website
-│   └── index.html
-├── src/
-│   ├── transaction.h        # Transaction struct (read/write sets, status)
-│   ├── workload.h           # Synthetic workload generator (tunable contention)
-│   ├── mvmemory.h           # Multi-version data store (lock-free version chains)
-│   ├── scheduler.h          # Collaborative scheduler (atomic counters, task dispatch)
-│   ├── executor.h           # Speculative execution + validation + abort logic
-│   ├── blockstm.h           # Top-level Block-STM engine
-│   └── sequential.h         # Sequential baseline (correctness reference)
-├── bench/
-│   ├── bench_scaling.cpp    # Thread scaling benchmark
-│   └── bench_contention.cpp # Contention sweep benchmark
-├── test/
-│   └── test_blockstm.cpp   # Correctness tests (parallel vs sequential equivalence)
-├── CMakeLists.txt
-├── .gitignore
-└── README.md
+./build/test/test_blockstm
+./build/bench/bench_scaling --threads 8 --block-size 10000 --accounts 1000
 ```
 
 ## References

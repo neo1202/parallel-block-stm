@@ -43,6 +43,7 @@
 #include <vector>
 #include <unordered_map>
 #include <optional>
+#include <thread>
 
 // ParallelContext (Algorithm 3: VM execution)
 class ParallelContext : public ExecutionContext {

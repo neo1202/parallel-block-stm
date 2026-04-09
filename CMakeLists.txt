@@ -30,6 +30,9 @@ target_link_libraries(blockstm_core INTERFACE Threads::Threads)
 add_library(doctest INTERFACE)
 target_include_directories(doctest INTERFACE ${CMAKE_SOURCE_DIR}/third_party)
 
+# --- Enable Testing ---
+enable_testing()
+
 # --- Tests ---
 add_subdirectory(test)
 

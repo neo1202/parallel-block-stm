@@ -17,6 +17,7 @@
 #include "transaction.h"
 #include "workload.h"
 #include "sequential.h"
+#include "blockstm.h"
 
 #include <algorithm>
 #include <chrono>
@@ -73,6 +74,21 @@ static double measure_sequential_ms(
     return std::chrono::duration<double, std::milli>(end - start).count();
 }
 
+static double measure_parallel_ms(
+    const std::vector<Transaction>& block,
+    const std::unordered_map<Key, Value>& initial_state,
+    int num_threads
+) {
+    auto start = std::chrono::steady_clock::now();
+    auto result = parallel_execute(block, initial_state, num_threads);
+    auto end = std::chrono::steady_clock::now();
+
+    // Prevent compiler from optimizing away the result
+    if (result.empty()) std::abort();
+
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
 static double median(std::vector<double>& v) {
     std::sort(v.begin(), v.end());
     size_t n = v.size();
@@ -98,7 +114,11 @@ int main(int argc, char* argv[]) {
         times.reserve(cfg.runs);
 
         for (int r = 0; r < cfg.runs; ++r) {
-            times.push_back(measure_sequential_ms(block, state));
+            if (cfg.threads == 1) {
+                times.push_back(measure_sequential_ms(block, state));
+            } else {
+                times.push_back(measure_parallel_ms(block, state, cfg.threads));
+            }
         }
 
         double med_ms = median(times);

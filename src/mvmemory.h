@@ -119,7 +119,7 @@ struct ChainNode {
 // Per-key version chain (Phase 2: sorted linked list + mutex).
 // One lock per key - different keys can be accessed concurrently.
 // Nodes are sorted by txn_idx descending (head = highest txn_idx).
-// Phase 6: will be replaced with Harris lock-free sorted linked list.
+// Phase 6: will be replaced with lock-free sorted linked list.
 struct VersionChain {
     std::mutex mtx;
     ChainNode* head = nullptr;  // highest txn_idx at head
@@ -268,25 +268,18 @@ public:
     // 1. Write the write-set into version chains (apply_write_set)
     // 2. Compare written locations with previous incarnation (rcu_update)
     // 3. Store the read-set for later validation
-    // Returns true if a NEW location was written (not written by prev incarnation).
+    // Returns true if a NEW location was written OR a value changed.
     bool record(Version version,
                 std::vector<ReadDescriptor> read_set,
                 std::vector<WriteDescriptor> write_set) {
         size_t txn_idx = version.txn_idx;
         size_t incarnation = version.incarnation;
 
+        // Line 40: compare with previous incarnation, clean up stale entries, and check for changes
+        bool changed = rcu_update_written_locations_and_check_changes(txn_idx, write_set);
+
         // Line 38: apply write-set to version chains
         apply_write_set(txn_idx, incarnation, write_set);
-
-        // Line 39: extract the set of written locations
-        std::vector<Key> new_locations;
-        new_locations.reserve(write_set.size());
-        for (const auto& wd : write_set) {
-            new_locations.push_back(wd.location);
-        }
-
-        // Line 40: compare with previous incarnation, clean up stale entries
-        bool wrote_new_location = rcu_update_written_locations(txn_idx, new_locations);
 
         // Line 41: store read-set for later validation (RCU update)
         {
@@ -296,7 +289,7 @@ public:
         }
 
         // Line 42
-        return wrote_new_location;
+        return changed;
     }
 
     // --- Algorithm 2, Line 62-72: validate_read_set() ---
@@ -403,34 +396,30 @@ private:
     }
 
     // --- Algorithm 2, Line 30-35: rcu_update_written_locations() ---
-    /*
-    比對「這次寫了哪些 key」vs「上次寫了哪些 key」
-    - 上次寫了 {A, B, C}，這次寫了 {A, B}
-        -> 刪掉 key=C 的 version chain 裡 txn_idx=5 的 node
-    - 上次寫了 {A, B}，這次寫了 {A, B, D}
-        -> 多了 D，回傳 true */
-    // Compare this incarnation's written locations with the previous incarnation's.
+    // Compare this incarnation's written locations and values with the previous one.
     //   1. Remove entries for locations no longer written (prev but not new)
     //   2. Store the new locations list (RCU update)
-    //   3. Return whether any NEW location was written (new but not prev)
-    //
-    // Why this matters:
-    //   If wrote_new_location == true -> all higher txs need re-validation
-    //   If wrote_new_location == false -> only this tx needs validation
-    bool rcu_update_written_locations(size_t txn_idx,
-                                      const std::vector<Key>& new_locations) {
+    //   3. Return whether any NEW location was written OR any value changed.
+    bool rcu_update_written_locations_and_check_changes(size_t txn_idx,
+                                                       const std::vector<WriteDescriptor>& write_set) {
         auto& aux = *txn_aux_[txn_idx];
 
         // Load previous locations (RCU read)
-        std::shared_ptr<std::vector<Key>> prev;
+        std::shared_ptr<std::vector<Key>> prev_locs;
         {
             std::lock_guard<std::mutex> lock(aux.mtx);
-            prev = aux.written_locations;
+            prev_locs = aux.written_locations;
         }
 
-        // Line 32-33: remove entries for locations written before but not now
+        std::vector<Key> new_locations;
+        new_locations.reserve(write_set.size());
+        for (const auto& wd : write_set) {
+            new_locations.push_back(wd.location);
+        }
+
+        // 1. Remove entries for locations written before but not now
         std::unordered_set<Key> new_set(new_locations.begin(), new_locations.end());
-        for (Key loc : *prev) {
+        for (Key loc : *prev_locs) {
             if (new_set.find(loc) == new_set.end()) {
                 auto it = data_.find(loc);
                 if (it != data_.end()) {
@@ -441,23 +430,48 @@ private:
             }
         }
 
-        // Line 35: check if new_locations \ prev_locations is non-empty
-        std::unordered_set<Key> prev_set(prev->begin(), prev->end());
-        bool wrote_new = false;
-        for (Key loc : new_locations) {
-            if (prev_set.find(loc) == prev_set.end()) {
-                wrote_new = true;
-                break;
+        // 2. Check if any value changed or new location added
+        bool changed = false;
+        
+        // Check if the set of locations changed
+        if (prev_locs->size() != new_locations.size()) {
+            changed = true;
+        } else {
+            // Same number of locations, check if they are the same keys
+            std::unordered_set<Key> prev_set(prev_locs->begin(), prev_locs->end());
+            for (Key loc : new_locations) {
+                if (prev_set.find(loc) == prev_set.end()) {
+                    changed = true;
+                    break;
+                }
             }
         }
 
-        // Line 34: store new locations (RCU update)
+        // Even if locations are the same, values might have changed.
+        // We must check values by looking at the existing nodes in MVMemory
+        // BEFORE apply_write_set overwrites them.
+        for (const auto& wd : write_set) {
+            auto it = data_.find(wd.location);
+            if (it == data_.end()) continue; // Should not happen given constructor
+            auto& chain = it->second;
+            std::lock_guard<std::mutex> lock(chain.mtx);
+            ChainNode* node = chain.find(txn_idx);
+            // If node was ESTIMATE or didn't exist or had different value, it's a change
+            if (!node || node->is_estimate || node->value != wd.value) {
+                changed = true;
+                // No break! We still need to continue for rcu_update_written_locations side effects 
+                // if we were doing more, but here we just need to know if it changed.
+                break; 
+            }
+        }
+
+        // 3. Store new locations (RCU update)
         {
             std::lock_guard<std::mutex> lock(aux.mtx);
             aux.written_locations = std::make_shared<std::vector<Key>>(new_locations);
         }
 
-        return wrote_new;
+        return changed;
     }
 
     // Internal read helper - caller must already hold chain.mtx.
@@ -470,7 +484,7 @@ private:
         if (!node) {
             return {ReadStatus::NOT_FOUND};
         }
-        // Line 52-53: ESTIMATE marker
+        // Line 52-53: ESTIMATE marker from a LOWER transaction
         if (node->is_estimate) {
             return {ReadStatus::READ_ERROR, {}, 0, node->txn_idx};
         }

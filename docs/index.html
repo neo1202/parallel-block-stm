@@ -460,17 +460,17 @@
             <tr>
               <td style="white-space:nowrap;">Week 1 <span style="color:var(--text-dim); font-size:0.8rem;">(3/26–4/3)</span></td>
               <td>Workload generator + sequential baseline + MVMemory data structure + proposal</td>
-              <td><span class="status wip">in progress</span></td>
+              <td><span class="status done">done</span></td>
             </tr>
             <tr>
               <td style="white-space:nowrap;">Week 2 <span style="color:var(--text-dim); font-size:0.8rem;">(4/4–4/10)</span></td>
               <td>Collaborative scheduler + speculative execution + validation + abort logic</td>
-              <td><span class="status todo">todo</span></td>
+              <td><span class="status done">done</span></td>
             </tr>
             <tr>
               <td style="white-space:nowrap;">Week 3 <span style="color:var(--text-dim); font-size:0.8rem;">(4/11–4/15)</span></td>
               <td>Integration + correctness testing (sequential equivalence) + ESTIMATE marker optimization + milestone report</td>
-              <td><span class="status todo">todo</span></td>
+              <td><span class="status done">done</span></td>
             </tr>
             <tr>
               <td style="white-space:nowrap;">Week 4 <span style="color:var(--text-dim); font-size:0.8rem;">(4/16–4/22)</span></td>
@@ -617,9 +617,145 @@
 
     <!-- ──── MILESTONE ──── -->
     <div class="tab-panel" id="milestone">
-      <div class="placeholder">
-        <div class="placeholder-icon">&#9671;</div>
-        <p>Milestone report will be posted here after April 14th.</p>
+      <div class="prose">
+
+        <h2>Summary</h2>
+        <p>We have a fully functional Block-STM parallel execution engine in C++20. The system correctly executes blocks of transactions in parallel across multiple threads and produces results identical to sequential execution. All core modules from the Block-STM paper (Algorithms 1–5) are implemented: multi-version memory (MVMemory), collaborative scheduler, speculative executor, and validation/abort logic. We have 17 passing test cases covering correctness, and benchmark infrastructure measuring throughput across thread counts and contention levels. The current implementation uses mutex-based synchronization; our next phase targets lock-free version chains using atomic CAS operations.</p>
+
+        <h2>Progress Summary</h2>
+        <p>All five algorithmic modules from the paper are implemented and integrated:</p>
+        <ul>
+          <li><strong>Transaction types &amp; workload generator</strong> (<code>transaction.h</code>, <code>workload.h</code>): Core data types, deterministic workload generation with tunable parameters (block size, account count, read/write ratio, compute intensity). All workloads are seeded for reproducibility and conserve total balance.</li>
+          <li><strong>Sequential baseline</strong> (<code>sequential.h</code>): Ground-truth reference implementation. All parallel results are verified against this.</li>
+          <li><strong>Multi-version data store</strong> (<code>mvmemory.h</code>): Per-key version chains implemented as mutex-protected sorted linked lists (descending by <code>txn_idx</code>). Supports all 7 operations from Algorithm 2: <code>read</code>, <code>apply_write_set</code>, <code>rcu_update_written_locations</code>, <code>record</code>, <code>validate_read_set</code>, <code>convert_writes_to_estimates</code>, <code>snapshot</code>.</li>
+          <li><strong>Collaborative scheduler</strong> (<code>scheduler.h</code>): Cache-padded atomic counters (<code>execution_idx</code>, <code>validation_idx</code>) for lock-free task dispatch. Per-transaction status tracking and dependency management with mutex protection. Implements Algorithms 4 and 5 from the paper.</li>
+          <li><strong>Executor &amp; entry point</strong> (<code>executor.h</code>, <code>blockstm.h</code>): Thread main loop (Algorithm 1), <code>ParallelContext</code> (Algorithm 3) with read-your-own-writes support, and the top-level <code>parallel_execute()</code> entry point that spawns threads and collects results.</li>
+        </ul>
+
+        <h2>Goals vs. Deliverables</h2>
+        <table>
+          <thead><tr><th>Proposal Goal</th><th>Status</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td>Sequential baseline</td><td><span class="status done">done</span></td><td></td></tr>
+            <tr><td>Workload generator</td><td><span class="status done">done</span></td><td>Tunable block size, accounts, r/w ratio</td></tr>
+            <tr><td>MVMemory (multi-version data store)</td><td><span class="status done">done</span></td><td>Mutex-based; lock-free version is next</td></tr>
+            <tr><td>Collaborative scheduler</td><td><span class="status done">done</span></td><td>Found and fixed a double-decrement bug in the paper's pseudocode</td></tr>
+            <tr><td>Speculative execution + validation + abort</td><td><span class="status done">done</span></td><td>Full Block-STM loop with ESTIMATE markers</td></tr>
+            <tr><td>Correctness verification</td><td><span class="status done">done</span></td><td>17 test cases, parallel == sequential across all configs</td></tr>
+            <tr><td>Lock-free MVMemory (CAS-based)</td><td><span class="status wip">in progress</span></td><td>Replacing mutex-locked linked list with CAS-based version</td></tr>
+            <tr><td>Performance evaluation on GHC</td><td><span class="status todo">todo</span></td><td>Benchmark scripts ready, need to run on GHC machines</td></tr>
+            <tr><td>Lock-free skip list or tree (stretch)</td><td><span class="status todo">todo</span></td><td>Upgrade version chain from O(n) linked list to O(log n) lookup</td></tr>
+            <tr><td>CUDA port (stretch)</td><td><span class="status todo">todo</span></td><td>Deprioritized in favor of lock-free + optimizations</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Nice to Have</h3>
+        <ul>
+          <li><strong>Lock-free skip list for version chains:</strong> Replace sorted linked list (O(n) lookup) with a lock-free skip list (O(log n) expected). This matters most under extreme contention where version chains grow long (e.g., 2 accounts with 10,000 transactions). Implementation complexity is between linked list and balanced tree.</li>
+          <li><strong>Dependency-check optimization:</strong> Before executing a transaction, scan the previous incarnation's read-set for ESTIMATE markers. If any are found, skip the full execution and abort immediately — avoids a completely wasted execution cycle.</li>
+          <li><strong>Thread pool:</strong> Currently threads are spawned and joined per block. A persistent thread pool across blocks would eliminate per-block thread creation overhead.</li>
+          <li><strong>Lock-free scheduler status:</strong> Pack <code>(incarnation, status)</code> into a single <code>atomic&lt;uint64_t&gt;</code> and use CAS instead of mutex for status transitions.</li>
+          <li><strong>Arena allocator for chain nodes:</strong> Since MVMemory is per-block, allocate all chain nodes from a memory pool and free the entire pool at block completion. Avoids per-node <code>new</code>/<code>delete</code> and sidesteps lock-free memory reclamation issues.</li>
+        </ul>
+
+        <h2>Preliminary Results</h2>
+        <p>Benchmarked on a MacBook Pro (Apple M-series, 8 cores) with Release build (<code>-O3</code>). Workload: 500,000 peer-to-peer transfer transactions (2 reads, 2 writes each) across 500 accounts (moderate contention), median of 5 runs.</p>
+
+        <table>
+          <thead><tr><th>Threads</th><th>Time (ms)</th><th>Throughput (txn/s)</th><th>Speedup</th></tr></thead>
+          <tbody>
+            <tr><td>1 (sequential)</td><td>12.0</td><td>41.6M</td><td>1.00x</td></tr>
+            <tr><td>2</td><td>498</td><td>1.00M</td><td>0.024x</td></tr>
+            <tr><td>4</td><td>378</td><td>1.32M</td><td>0.032x</td></tr>
+            <tr><td>8</td><td>537</td><td>0.93M</td><td>0.022x</td></tr>
+          </tbody>
+        </table>
+
+        <p><strong>Analysis:</strong> The parallel version is currently ~40x slower than sequential. This is expected for the mutex-based implementation. Each transaction performs only ~10 arithmetic instructions (a simple balance transfer), but the parallel version acquires and releases a mutex lock on every MVMemory read and write (4 lock/unlock pairs per transaction). The synchronization cost dominates the actual computation by orders of magnitude.</p>
+
+        <p>Increasing thread count from 4 to 8 makes performance <em>worse</em> (378ms &rarr; 537ms), confirming that mutex contention — not compute capacity — is the bottleneck. This motivates our next phase: replacing mutex-protected version chains with lock-free CAS-based operations, which should dramatically reduce per-operation overhead and allow parallelism to outweigh synchronization cost.</p>
+
+        <h2>Updated Schedule</h2>
+        <h3>Completed</h3>
+        <table>
+          <thead><tr><th>Period</th><th>Task</th><th>Who</th></tr></thead>
+          <tbody>
+            <tr>
+              <td style="white-space:nowrap;">Week 1, first half<br><span style="color:var(--text-dim); font-size:0.8rem;">(3/26–3/29)</span></td>
+              <td>Project setup, CMake build system, transaction types, workload generator, sequential baseline</td>
+              <td>huayow</td>
+            </tr>
+            <tr>
+              <td style="white-space:nowrap;">Week 1, second half<br><span style="color:var(--text-dim); font-size:0.8rem;">(3/30–4/3)</span></td>
+              <td>MVMemory (Algorithm 2), Scheduler (Algorithm 4+5), sequential correctness test suite</td>
+              <td>huayow</td>
+            </tr>
+            <tr>
+              <td style="white-space:nowrap;">Week 2, first half<br><span style="color:var(--text-dim); font-size:0.8rem;">(4/4–4/7)</span></td>
+              <td>Executor thread loop (Algorithm 1), ParallelContext (Algorithm 3), <code>parallel_execute</code> entry point, architecture diagrams</td>
+              <td>pijungc</td>
+            </tr>
+            <tr>
+              <td style="white-space:nowrap;">Week 2, second half<br><span style="color:var(--text-dim); font-size:0.8rem;">(4/8–4/10)</span></td>
+              <td>Parallel correctness tests, bug fixes (scheduler double-decrement, RCU ordering), benchmark tests</td>
+              <td>pijungc</td>
+            </tr>
+            <tr>
+              <td style="white-space:nowrap;">Week 3, first half<br><span style="color:var(--text-dim); font-size:0.8rem;">(4/11–4/14)</span></td>
+              <td>Code review, bug analysis, benchmark script infrastructure, milestone report</td>
+              <td>huayow</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>Remaining</h3>
+        <table>
+          <thead><tr><th>Period</th><th>Task</th><th>Who</th></tr></thead>
+          <tbody>
+            <tr>
+              <td style="white-space:nowrap;">Week 3, second half<br><span style="color:var(--text-dim); font-size:0.8rem;">(4/15–4/17)</span></td>
+              <td>Lock-free version chain: replace mutex-protected linked list with CAS-based sorted linked list</td>
+              <td>huayow</td>
+            </tr>
+            <tr>
+              <td style="white-space:nowrap;">Week 4, first half<br><span style="color:var(--text-dim); font-size:0.8rem;">(4/18–4/21)</span></td>
+              <td>Arena allocator for chain nodes. Lock-free scheduler status (pack incarnation+status into <code>atomic&lt;uint64_t&gt;</code>, CAS)</td>
+              <td>pijungc</td>
+            </tr>
+            <tr>
+              <td style="white-space:nowrap;">Week 4, second half<br><span style="color:var(--text-dim); font-size:0.8rem;">(4/22–4/24)</span></td>
+              <td>Dependency-check optimization. Thread pool. Performance evaluation on GHC: thread scaling (1–8), contention sweep, cache profiling with <code>perf</code></td>
+              <td>Both</td>
+            </tr>
+            <tr>
+              <td style="white-space:nowrap;">Week 5, first half<br><span style="color:var(--text-dim); font-size:0.8rem;">(4/25–4/27)</span></td>
+              <td>Final benchmarks on GHC. Lock-free skip list for version chains (if time permits). Abort rate analysis</td>
+              <td>Both</td>
+            </tr>
+            <tr>
+              <td style="white-space:nowrap;">Week 5, second half<br><span style="color:var(--text-dim); font-size:0.8rem;">(4/28–4/30)</span></td>
+              <td>Final report + poster</td>
+              <td>Both</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>Poster Session Plan</h2>
+        <p>We plan to present the following at the poster session:</p>
+        <ul>
+          <li><strong>Speedup graph:</strong> Sequential vs. parallel throughput across 1, 2, 4, 8 threads, comparing mutex-based and lock-free implementations.</li>
+          <li><strong>Contention sweep:</strong> Throughput vs. number of accounts (2 to 5000), showing how Block-STM adapts to different conflict rates.</li>
+          <li><strong>Architecture diagram:</strong> Visual overview of MVMemory, Scheduler, and Executor interactions.</li>
+          <li><strong>Abort rate analysis:</strong> Number of aborts and re-executions at different contention levels.</li>
+        </ul>
+
+        <h2>Concerns</h2>
+        <ul>
+          <li><strong>Lock-free version chain implementation:</strong> Our current version chains use a mutex-protected sorted linked list per key. We plan to replace this with a lock-free linked list using CAS operations, and ideally upgrade further to a lock-free skip list (O(log n) lookup) or tree. However, implementing a correct lock-free skip list or tree is significantly harder than a linked list, and we may not have time to go beyond the linked list version. CAS-based operations also require careful handling of ABA problems and memory ordering; ThreadSanitizer has limited coverage for relaxed atomics, so correctness will rely on heavy randomized stress testing.</li>
+          <li><strong>Memory reclamation in lock-free structures:</strong> When a node is logically deleted from a lock-free list, other threads may still hold references. Since MVMemory is per-block, we plan to use an arena allocator that defers all deallocation to block completion, avoiding hazard pointers or epoch-based reclamation.</li>
+          <li><strong>GHC cache coherence traffic:</strong> All threads frequently read and write shared data (MVMemory, scheduler counters), generating heavy cache coherence traffic. At high thread counts this overhead may outweigh the benefit of parallelism, especially under high contention.</li>
+        </ul>
+
       </div>
     </div>
 

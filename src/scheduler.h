@@ -240,15 +240,14 @@ public:
         // Line 168: resume all dependents
         resume_dependencies(deps);
 
-        // Line 169-173: schedule validation
-        // Conservative: always decrease validation_idx to txn_idx to ensure 
-        // higher transactions are re-validated if we wrote anything.
-        if (wrote_new_location) {
-            decrease_validation_idx(static_cast<int>(txn_idx));
-        } else {
-            // If we didn't write anything new, we might still need to validate ourselves.
-            // But if validation_idx was already passed us, we should return a task.
-            if (validation_idx_.value.load(std::memory_order_acquire) > static_cast<int>(txn_idx)) {
+        // Line 169-173: schedule validation (paper's original logic)
+        if (validation_idx_.value.load(std::memory_order_acquire)
+            > static_cast<int>(txn_idx)) {
+            if (wrote_new_location) {
+                // Line 171: decrease validation_idx to txn_idx
+                decrease_validation_idx(static_cast<int>(txn_idx));
+            } else {
+                // Line 173: return validation task directly to caller
                 return Task{{txn_idx, incarnation}, TaskKind::VALIDATION_TASK};
             }
         }

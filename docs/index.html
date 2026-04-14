@@ -643,9 +643,9 @@
             <tr><td>Speculative execution + validation + abort</td><td><span class="status done">done</span></td><td>Full Block-STM loop with ESTIMATE markers</td></tr>
             <tr><td>Correctness verification</td><td><span class="status done">done</span></td><td>17 test cases, parallel == sequential across all configs</td></tr>
             <tr><td>Lock-free MVMemory (CAS-based)</td><td><span class="status wip">in progress</span></td><td>Replacing mutex-locked linked list with CAS-based version</td></tr>
+            <tr><td>Dependency-check optimization</td><td><span class="status todo">todo</span></td><td>Skip VM execution when read-set contains ESTIMATE entries (paper Section 4.5)</td></tr>
             <tr><td>Performance evaluation on GHC</td><td><span class="status todo">todo</span></td><td>Benchmark scripts ready, need to run on GHC machines</td></tr>
             <tr><td>Lock-free skip list or tree (stretch)</td><td><span class="status todo">todo</span></td><td>Upgrade version chain from O(n) linked list to O(log n) lookup</td></tr>
-            <tr><td>CUDA port (stretch)</td><td><span class="status todo">todo</span></td><td>Deprioritized in favor of lock-free + optimizations</td></tr>
           </tbody>
         </table>
 
@@ -753,7 +753,7 @@
         <ul>
           <li><strong>Lock-free version chain implementation:</strong> Our current version chains use a mutex-protected sorted linked list per key. We plan to replace this with a lock-free linked list using CAS operations, and ideally upgrade further to a lock-free skip list (O(log n) lookup) or tree. However, implementing a correct lock-free skip list or tree is significantly harder than a linked list, and we may not have time to go beyond the linked list version. CAS-based operations also require careful handling of ABA problems and memory ordering; ThreadSanitizer has limited coverage for relaxed atomics, so correctness will rely on heavy randomized stress testing.</li>
           <li><strong>Memory reclamation in lock-free structures:</strong> When a node is logically deleted from a lock-free list, other threads may still hold references. Since MVMemory is per-block, we plan to use an arena allocator that defers all deallocation to block completion, avoiding hazard pointers or epoch-based reclamation.</li>
-          <li><strong>GHC cache coherence traffic:</strong> All threads frequently read and write shared data (MVMemory, scheduler counters), generating heavy cache coherence traffic. At high thread counts this overhead may outweigh the benefit of parallelism, especially under high contention.</li>
+          <li><strong>Cache coherence at high thread counts:</strong> All threads frequently read and write shared data (MVMemory, scheduler counters), generating heavy cache coherence traffic. At high thread counts this overhead may outweigh the benefit of parallelism, especially under high contention. We plan to benchmark on PSC (Bridges-2, up to 128 cores) in addition to GHC (8 cores) to characterize scaling limits, but it is unclear whether our implementation will scale meaningfully beyond 8–16 threads.</li>
         </ul>
 
       </div>

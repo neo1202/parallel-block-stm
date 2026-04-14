@@ -20,7 +20,19 @@
 //
 // Output: CSV to stdout (pipe to file with > results.csv)
 //
+/*
+t == 1 時跑的是真的 sequential_execute（Line 139），不是 parallel 開 1 個 thread。這是正確的做法：
 
+threads=1  -> sequential_execute()     <- 純 sequential，沒有 MVMemory/Scheduler
+threads=2+ -> parallel_execute(t)      <- parallel 版，有全部 overhead
+如果用 parallel 開 1 thread，那個時間包含了建 MVMemory、建 Scheduler、開 thread、鎖 version chain 等所有 overhead，不是公平的 baseline。
+
+所以 bench_scaling 的輸出：
+threads=1  的時間 = 純 sequential 的速度
+threads=8  的時間 = parallel 的速度
+speedup = threads=1 的時間 / threads=8 的時間
+這就是論文裡衡量加速比的方式。
+*/
 #include "transaction.h"
 #include "workload.h"
 #include "sequential.h"

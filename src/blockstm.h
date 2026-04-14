@@ -1,30 +1,12 @@
 #pragma once
 
-// blockstm.h - Top-Level Block-STM Engine
+// blockstm.h - entry point. One block = one MVMemory + one Scheduler + N
+// threads spawned, joined, then snapshot() gives the final state.
 //
-// The public entry point. Users call parallel_execute() with a block of
-// transactions, initial state, and thread count. Everything else is internal.
-//
-// WHAT IT DOES:
-//   1. Create MVMemory (shared multi-version store for this block)
-//   2. Create Scheduler (task dispatcher for this block)
-//   3. Spawn N threads, each running the executor's run() loop
-//   4. Wait for all threads to join (Scheduler.done() triggers exit)
-//   5. Call MVMemory.snapshot() to collect final state
-//   6. Return final state (must == sequential_execute result)
-//
-// LIFETIME:
-//   One block = one MVMemory + one Scheduler + N threads.
-//   All created at the start of parallel_execute(), all destroyed at the end.
-//   The next block starts fresh.
-//
-// PUBLIC API:
-//   std::unordered_map<Key, Value> parallel_execute(
-//       const std::vector<Transaction>& block,
-//       const std::unordered_map<Key, Value>& initial_state,
-//       int num_threads
-//   );
-//
+// TODO(neo): 改成thread pool? 不要每次block都銷毀thread
+// * 很多thread一起處理一個block, 他們改同一份MVMemory有很多版本
+// * snapshot時得到此block改動過後那些key最終的值, 然後寫進global state以後回傳
+// * 這是一個sequential bottlenect, 因為下一個block得看到所有key最新的狀態
 
 #include "transaction.h"
 #include "mvmemory.h"
@@ -35,9 +17,6 @@
 #include <unordered_map>
 #include <thread>
 
-// --- parallel_execute ---
-// Executes a block of transactions concurrently using the Block-STM algorithm.
-// Returns a new state map reflecting all applied changes.
 inline std::unordered_map<Key, Value> parallel_execute(
     const std::vector<Transaction>& block,
     const std::unordered_map<Key, Value>& initial_state,

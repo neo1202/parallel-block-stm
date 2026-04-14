@@ -46,6 +46,7 @@
 #include <thread>
 
 // ParallelContext (Algorithm 3: VM execution)
+// context = 「你在什麼環境下操作」 決定了同一段邏輯在不同環境下的行為
 class ParallelContext : public ExecutionContext {
     MVMemory& memory_;
     const std::unordered_map<Key, Value>& initial_state_;

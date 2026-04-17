@@ -6,6 +6,7 @@
 #   ./scripts/run_benchmarks.sh            correctness (parallel == sequential)
 #   ./scripts/run_benchmarks.sh speed      main benchmark: 1,2,4,8 threads
 #   ./scripts/run_benchmarks.sh sweep      contention sweep: low/mid/high
+#   ./scripts/run_benchmarks.sh record     run benchmarks, save CSVs & plots
 #
 # =============================================================================
 
@@ -69,6 +70,41 @@ run_sweep() {
     ./"$DIR_RELEASE"/bench/bench_scaling --threads 1,2,4,8 --block-size 500000 --accounts 10 --runs 5
 }
 
+# --- Record: save outputs & plot ---
+run_record() {
+    build_release
+    
+    TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+    OUT_DIR="benchmark_records/${TIMESTAMP}"
+    mkdir -p "$OUT_DIR"
+    
+    echo ""
+    echo -e "${YELLOW}=== Recording benchmark results to ${OUT_DIR} ===${NC}"
+    
+    # Speed
+    echo -e "${YELLOW}Running scaling benchmark...${NC}"
+    ./"$DIR_RELEASE"/bench/bench_scaling --threads 1,2,4,8 --block-size 500000 --accounts 500 --runs 5 > "${OUT_DIR}/scaling.csv"
+    
+    # Sweep
+    echo -e "${YELLOW}Running sweep benchmark...${NC}"
+    ./"$DIR_RELEASE"/bench/bench_scaling --threads 1,2,4,8 --block-size 500000 --accounts 5000 --runs 5 > "${OUT_DIR}/sweep_low.csv"
+    ./"$DIR_RELEASE"/bench/bench_scaling --threads 1,2,4,8 --block-size 500000 --accounts 500 --runs 5 > "${OUT_DIR}/sweep_mid.csv"
+    ./"$DIR_RELEASE"/bench/bench_scaling --threads 1,2,4,8 --block-size 500000 --accounts 10 --runs 5 > "${OUT_DIR}/sweep_high.csv"
+    
+    # Combine Sweep CSVs
+    head -n 1 "${OUT_DIR}/sweep_low.csv" > "${OUT_DIR}/sweep.csv"
+    tail -n +2 "${OUT_DIR}/sweep_low.csv" >> "${OUT_DIR}/sweep.csv"
+    tail -n +2 "${OUT_DIR}/sweep_mid.csv" >> "${OUT_DIR}/sweep.csv"
+    tail -n +2 "${OUT_DIR}/sweep_high.csv" >> "${OUT_DIR}/sweep.csv"
+    rm "${OUT_DIR}/sweep_low.csv" "${OUT_DIR}/sweep_mid.csv" "${OUT_DIR}/sweep_high.csv"
+
+    # Plot
+    echo -e "${YELLOW}Plotting results...${NC}"
+    python3 scripts/plot_results.py "${OUT_DIR}/scaling.csv" "${OUT_DIR}/sweep.csv" "${OUT_DIR}"
+    
+    echo -e "${GREEN}Done! Records and plots saved to ${OUT_DIR}${NC}"
+}
+
 # --- Main ---
 case "${1:-default}" in
     default)
@@ -80,11 +116,15 @@ case "${1:-default}" in
     sweep)
         run_sweep
         ;;
+    record)
+        run_record
+        ;;
     *)
-        echo "Usage: $0 [speed|sweep]"
+        echo "Usage: $0 [speed|sweep|record]"
         echo ""
         echo "  (no args)   Correctness tests (parallel == sequential)"
         echo "  speed       Main benchmark: 500k txs, 1/2/4/8 threads"
         echo "  sweep       Contention sweep: low/mid/high x 1/2/4/8 threads"
+        echo "  record      Run benchmarks, save CSVs and generate plots"
         ;;
 esac

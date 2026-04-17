@@ -20,6 +20,7 @@ obj/
 *.swp
 *.swo
 *~
+venv/
 
 # OS
 .DS_Store
@@ -37,3 +38,6 @@ results/
 # Dependencies
 node_modules/
 
+# Python & Benchmarks
+venv/
+benchmark_records/

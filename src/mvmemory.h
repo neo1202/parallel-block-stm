@@ -145,42 +145,51 @@ struct VersionChain {
         return nullptr;
     }
 
-    // Insert or update a node for txn_idx.
-    // If exists: return it so caller can overwrite incarnation/value/is_estimate.
-    // If not: insert lock-free in sorted position (descending by txn_idx).
-    ChainNode* upsert(size_t txn_idx) {
+    // Insert a pre-built node, or return the existing node for its txn_idx.
+    //
+    // IMPORTANT: Caller MUST fully initialize new_node's fields (value,
+    // incarnation, is_estimate) BEFORE calling this. Once CAS succeeds,
+    // the node is immediately visible to other threads - any fields set
+    // after insertion may be observed as stale (value=0) by concurrent readers,
+    // violating Block-STM's "same version -> same value" invariant.
+    //
+    // Returns:
+    //   - new_node if it was successfully inserted
+    //   - existing node if one with the same txn_idx was found (new_node is deleted)
+    ChainNode* upsert(ChainNode* new_node) {
+        size_t txn_idx = new_node->txn_idx;
         while (true) {
             ChainNode* prev = nullptr;
             ChainNode* cur = head.load(std::memory_order_acquire);
-            
+
             // Find insertion point
             while (cur && cur->txn_idx > txn_idx) {
                 prev = cur;
                 cur = cur->next.load(std::memory_order_acquire);
             }
 
-            // If found, return it
+            // If found, un-delete and return existing
             if (cur && cur->txn_idx == txn_idx) {
+                cur->is_deleted.store(false, std::memory_order_release);
+                delete new_node;
                 return cur;
             }
 
-            // Not found, need to insert new_node between prev and cur
-            ChainNode* new_node = new ChainNode(txn_idx);
+            // Not found, insert new_node between prev and cur
             new_node->next.store(cur, std::memory_order_relaxed);
 
             if (prev == nullptr) {
-                // Insert at head
-                if (head.compare_exchange_weak(cur, new_node, std::memory_order_release, std::memory_order_acquire)) {
+                if (head.compare_exchange_weak(cur, new_node,
+                        std::memory_order_release, std::memory_order_acquire)) {
                     return new_node;
                 }
             } else {
-                // Insert after prev
-                if (prev->next.compare_exchange_weak(cur, new_node, std::memory_order_release, std::memory_order_acquire)) {
+                if (prev->next.compare_exchange_weak(cur, new_node,
+                        std::memory_order_release, std::memory_order_acquire)) {
                     return new_node;
                 }
             }
-            // CAS failed, retry
-            delete new_node;
+            // CAS failed, retry from head (keep new_node for reuse)
         }
     }
 
@@ -386,11 +395,24 @@ private:
             auto it = data_.find(wd.location);
             assert(it != data_.end() && "write to unknown location");
             auto& chain = it->second;
-            ChainNode* node = chain.upsert(txn_idx);
-            node->incarnation.store(incarnation, std::memory_order_relaxed);
-            node->value.store(wd.value, std::memory_order_relaxed);
-            node->is_estimate.store(false, std::memory_order_relaxed);
-            node->is_deleted.store(false, std::memory_order_release);
+
+            // Pre-build node with correct fields BEFORE inserting into list.
+            // Prevents a race where another thread reads value=0 between
+            // CAS success and the subsequent stores.
+            auto* candidate = new ChainNode(txn_idx);
+            candidate->incarnation.store(incarnation, std::memory_order_relaxed);
+            candidate->value.store(wd.value, std::memory_order_relaxed);
+            candidate->is_estimate.store(false, std::memory_order_relaxed);
+            candidate->is_deleted.store(false, std::memory_order_relaxed);
+
+            ChainNode* node = chain.upsert(candidate);
+            if (node != candidate) {
+                // Existing node - update its fields (only one writer per txn_idx).
+                node->incarnation.store(incarnation, std::memory_order_relaxed);
+                node->value.store(wd.value, std::memory_order_relaxed);
+                node->is_estimate.store(false, std::memory_order_relaxed);
+                node->is_deleted.store(false, std::memory_order_release);
+            }
         }
     }
 

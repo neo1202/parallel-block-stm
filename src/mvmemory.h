@@ -39,6 +39,7 @@
 
 #include "transaction.h"
 
+#include <atomic>
 #include <cassert>
 #include <map>
 #include <memory>
@@ -108,10 +109,11 @@ struct WriteDescriptor {
 //   next        - pointer to the next node (lower txn_idx)
 struct ChainNode {
     size_t txn_idx;
-    size_t incarnation = 0;
-    Value value = 0;
-    bool is_estimate = false;
-    ChainNode* next = nullptr;
+    std::atomic<size_t> incarnation{0};
+    std::atomic<Value> value{0};
+    std::atomic<bool> is_estimate{false};
+    std::atomic<bool> is_deleted{false};
+    std::atomic<ChainNode*> next{nullptr};
 
     ChainNode(size_t idx) : txn_idx(idx) {}
 };
@@ -121,85 +123,85 @@ struct ChainNode {
 // Nodes are sorted by txn_idx descending (head = highest txn_idx).
 // Phase 6: will be replaced with lock-free sorted linked list.
 struct VersionChain {
-    std::mutex mtx;
-    ChainNode* head = nullptr;  // highest txn_idx at head
+    std::atomic<ChainNode*> head{nullptr};
 
     ~VersionChain() {
-        ChainNode* cur = head;
+        ChainNode* cur = head.load(std::memory_order_relaxed);
         while (cur) {
             ChainNode* tmp = cur;
-            cur = cur->next;
+            cur = cur->next.load(std::memory_order_relaxed);
             delete tmp;
         }
     }
 
     // Find the node for txn_idx, or nullptr if not found.
-    // Caller must hold mtx.
-    ChainNode* find(size_t txn_idx) {
-        ChainNode* cur = head;
+    ChainNode* find(size_t txn_idx) const {
+        ChainNode* cur = head.load(std::memory_order_acquire);
         while (cur) {
             if (cur->txn_idx == txn_idx) return cur;
             if (cur->txn_idx < txn_idx) return nullptr;  // past it (descending)
-            cur = cur->next;
+            cur = cur->next.load(std::memory_order_acquire);
         }
         return nullptr;
     }
 
     // Insert or update a node for txn_idx.
-    // If exists: overwrite incarnation/value/is_estimate.
-    // If not: insert in sorted position (descending by txn_idx).
-    // Caller must hold mtx.
+    // If exists: return it so caller can overwrite incarnation/value/is_estimate.
+    // If not: insert lock-free in sorted position (descending by txn_idx).
     ChainNode* upsert(size_t txn_idx) {
-        // Check if already exists
-        ChainNode* existing = find(txn_idx);
-        if (existing) return existing;
-
-        // Insert new node in sorted position (descending)
-        auto* node = new ChainNode(txn_idx);
-        if (!head || txn_idx > head->txn_idx) {
-            // Insert at head
-            node->next = head;
-            head = node;
-        } else {
-            // Find insertion point: after prev, before prev->next
-            ChainNode* prev = head;
-            while (prev->next && prev->next->txn_idx > txn_idx) {
-                prev = prev->next;
+        while (true) {
+            ChainNode* prev = nullptr;
+            ChainNode* cur = head.load(std::memory_order_acquire);
+            
+            // Find insertion point
+            while (cur && cur->txn_idx > txn_idx) {
+                prev = cur;
+                cur = cur->next.load(std::memory_order_acquire);
             }
-            node->next = prev->next;
-            prev->next = node;
+
+            // If found, return it
+            if (cur && cur->txn_idx == txn_idx) {
+                return cur;
+            }
+
+            // Not found, need to insert new_node between prev and cur
+            ChainNode* new_node = new ChainNode(txn_idx);
+            new_node->next.store(cur, std::memory_order_relaxed);
+
+            if (prev == nullptr) {
+                // Insert at head
+                if (head.compare_exchange_weak(cur, new_node, std::memory_order_release, std::memory_order_acquire)) {
+                    return new_node;
+                }
+            } else {
+                // Insert after prev
+                if (prev->next.compare_exchange_weak(cur, new_node, std::memory_order_release, std::memory_order_acquire)) {
+                    return new_node;
+                }
+            }
+            // CAS failed, retry
+            delete new_node;
         }
-        return node;
     }
 
-    // Remove the node for txn_idx. Caller must hold mtx.
+    // Logically remove the node for txn_idx.
     void erase(size_t txn_idx) {
-        if (!head) return;
-        if (head->txn_idx == txn_idx) {
-            ChainNode* tmp = head;
-            head = head->next;
-            delete tmp;
-            return;
-        }
-        ChainNode* prev = head;
-        while (prev->next) {
-            if (prev->next->txn_idx == txn_idx) {
-                ChainNode* tmp = prev->next;
-                prev->next = tmp->next;
-                delete tmp;
-                return;
-            }
-            prev = prev->next;
+        ChainNode* node = find(txn_idx);
+        if (node) {
+            node->is_deleted.store(true, std::memory_order_release);
         }
     }
 
-    // Find the node with the highest txn_idx strictly less than the given idx.
-    // Caller must hold mtx.
-    ChainNode* find_less_than(size_t txn_idx) {
-        ChainNode* cur = head;
+    // Find the node with the highest valid txn_idx strictly less than the given idx.
+    ChainNode* find_highest_valid_less_than(size_t txn_idx) const {
+        ChainNode* cur = head.load(std::memory_order_acquire);
         while (cur) {
-            if (cur->txn_idx < txn_idx) return cur;  // first one less (descending)
-            cur = cur->next;
+            if (cur->txn_idx < txn_idx) {
+                if (!cur->is_deleted.load(std::memory_order_acquire)) {
+                    return cur;  // first valid one less (descending)
+                }
+            }
+            cur = cur->next.load(std::memory_order_acquire);
         }
         return nullptr;
     }
@@ -258,8 +260,7 @@ public:
             return {ReadStatus::NOT_FOUND};
         }
         auto& chain = it->second;
-        std::lock_guard<std::mutex> lock(chain.mtx);
-        return read_locked(chain, txn_idx);
+        return read_lockfree(chain, txn_idx);
     }
 
     // --- Algorithm 2, Line 36-42: record() ---
@@ -349,10 +350,9 @@ public:
             auto it = data_.find(loc);
             if (it == data_.end()) continue;
             auto& chain = it->second;
-            std::lock_guard<std::mutex> lock(chain.mtx);
             ChainNode* node = chain.find(txn_idx);
             if (node) {
-                node->is_estimate = true;
+                node->is_estimate.store(true, std::memory_order_release);
             }
         }
     }
@@ -366,8 +366,7 @@ public:
     std::unordered_map<Key, Value> snapshot() {
         std::unordered_map<Key, Value> ret;
         for (auto& [location, chain] : data_) {
-            std::lock_guard<std::mutex> lock(chain.mtx);
-            ReadResult result = read_locked(chain, block_size_);
+            ReadResult result = read_lockfree(chain, block_size_);
             if (result.status == ReadStatus::OK) {
                 ret[location] = result.value;
             }
@@ -387,11 +386,11 @@ private:
             auto it = data_.find(wd.location);
             assert(it != data_.end() && "write to unknown location");
             auto& chain = it->second;
-            std::lock_guard<std::mutex> lock(chain.mtx);
             ChainNode* node = chain.upsert(txn_idx);
-            node->incarnation = incarnation;
-            node->value = wd.value;
-            node->is_estimate = false;
+            node->incarnation.store(incarnation, std::memory_order_relaxed);
+            node->value.store(wd.value, std::memory_order_relaxed);
+            node->is_estimate.store(false, std::memory_order_relaxed);
+            node->is_deleted.store(false, std::memory_order_release);
         }
     }
 
@@ -424,7 +423,6 @@ private:
                 auto it = data_.find(loc);
                 if (it != data_.end()) {
                     auto& chain = it->second;
-                    std::lock_guard<std::mutex> lock(chain.mtx);
                     chain.erase(txn_idx);
                 }
             }
@@ -454,13 +452,13 @@ private:
             auto it = data_.find(wd.location);
             if (it == data_.end()) continue; // Should not happen given constructor
             auto& chain = it->second;
-            std::lock_guard<std::mutex> lock(chain.mtx);
             ChainNode* node = chain.find(txn_idx);
             // If node was ESTIMATE or didn't exist or had different value, it's a change
-            if (!node || node->is_estimate || node->value != wd.value) {
+            if (!node || 
+                node->is_deleted.load(std::memory_order_acquire) ||
+                node->is_estimate.load(std::memory_order_acquire) || 
+                node->value.load(std::memory_order_acquire) != wd.value) {
                 changed = true;
-                // No break! We still need to continue for rcu_update_written_locations side effects 
-                // if we were doing more, but here we just need to know if it changed.
                 break; 
             }
         }
@@ -477,18 +475,18 @@ private:
     // Internal read helper - caller must already hold chain.mtx.
     // Used by read() and snapshot() to avoid double-locking.
     // Scans the linked list (descending txn_idx) for the first node < txn_idx.
-    ReadResult read_locked(VersionChain& chain, size_t txn_idx) const {
-        // Line 48: find highest idx < txn_idx
-        ChainNode* node = chain.find_less_than(txn_idx);
+    ReadResult read_lockfree(const VersionChain& chain, size_t txn_idx) const {
+        // Line 48: find highest valid idx < txn_idx
+        ChainNode* node = chain.find_highest_valid_less_than(txn_idx);
         // Line 49-50: no entry with smaller idx
         if (!node) {
             return {ReadStatus::NOT_FOUND};
         }
         // Line 52-53: ESTIMATE marker from a LOWER transaction
-        if (node->is_estimate) {
+        if (node->is_estimate.load(std::memory_order_acquire)) {
             return {ReadStatus::READ_ERROR, {}, 0, node->txn_idx};
         }
         // Line 54: valid entry
-        return {ReadStatus::OK, {node->txn_idx, node->incarnation}, node->value, 0};
+        return {ReadStatus::OK, {node->txn_idx, node->incarnation.load(std::memory_order_acquire)}, node->value.load(std::memory_order_acquire), 0};
     }
 };

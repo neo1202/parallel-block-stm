@@ -65,25 +65,10 @@ struct Task {
     TaskKind kind;
 };
 
-// Transaction status (per-transaction, lock-free)
+// Transaction status (per-transaction, mutex-protected)
 // State machine: READY_TO_EXECUTE(i) -> EXECUTING(i) -> EXECUTED(i)
 //                     ↑                                    ↓
 //                READY_TO_EXECUTE(i+1) <- ABORTING(i) <-────┘
-//
-// Lock-free Design:
-//   Instead of using a std::mutex to protect `incarnation` and `status`,
-//   we pack both into a single 64-bit atomic integer (`state`).
-//   - High 32 bits: incarnation (generation number)
-//   - Low 32 bits:  TxnStatus enum
-//   This allows us to perform atomic Compare-And-Swap (CAS) on both values
-//   simultaneously, entirely eliminating lock contention during state transitions.
-//
-// Performance Note (False Sharing):
-//   `alignas(64)` is CRITICAL here. Without it, multiple TxnStatusEntry
-//   objects (each 8 bytes) would occupy the same 64-byte cache line.
-//   Under high contention, concurrent CAS operations on different transactions
-//   would invalidate the entire cache line, causing severe performance
-//   degradation (up to 3x slower than the mutex version).
 enum class TxnStatus {
     READY_TO_EXECUTE,
     EXECUTING,
@@ -91,44 +76,16 @@ enum class TxnStatus {
     ABORTING
 };
 
-struct alignas(64) TxnStatusEntry {
-    std::atomic<uint64_t> state;
-
-    TxnStatusEntry() {
-        state.store(pack(0, TxnStatus::READY_TO_EXECUTE), std::memory_order_relaxed);
-    }
-
-    static uint64_t pack(uint32_t incarnation, TxnStatus status) {
-        return (static_cast<uint64_t>(incarnation) << 32) | static_cast<uint32_t>(status);
-    }
-
-    static std::pair<size_t, TxnStatus> unpack(uint64_t val) {
-        return {static_cast<size_t>(val >> 32), static_cast<TxnStatus>(val & 0xFFFFFFFF)};
-    }
+struct TxnStatusEntry {
+    std::mutex mtx;
+    size_t incarnation = 0;
+    TxnStatus status = TxnStatus::READY_TO_EXECUTE;
 };
 
-// Per-transaction dependency set (Lock-free Treiber Stack)
-struct DepNode {
-    size_t txn_idx;
-    DepNode* next;
-    DepNode(size_t idx) : txn_idx(idx), next(nullptr) {}
-};
-
-// A special marker to indicate the dependency list is closed (transaction EXECUTED).
-static DepNode* const CLOSED_MARKER = reinterpret_cast<DepNode*>(static_cast<uintptr_t>(-1));
-
+// Per-transaction dependency set (mutex-protected)
 struct TxnDependency {
-    std::atomic<DepNode*> head{nullptr};
-
-    ~TxnDependency() {
-        DepNode* cur = head.load(std::memory_order_relaxed);
-        if (cur == CLOSED_MARKER) cur = nullptr;
-        while (cur) {
-            DepNode* next = cur->next;
-            delete cur;
-            cur = next;
-        }
-    }
+    std::mutex mtx;
+    std::unordered_set<size_t> dependents;  // txn indices that depend on this tx
 };
 
 // RAII TaskGuard for num_active_tasks (Section 4)
@@ -179,7 +136,7 @@ public:
         txn_status_.reserve(block_size);
         txn_dependency_.reserve(block_size);
         // 為什麼 push_back 不直接開好
-        // 因為 TxnDependency 裡面有 std::mutex，mutex 不能 be copy 也不能 be move
+        // 因為 TxnStatusEntry 和 TxnDependency 裡面有 std::mutex，mutex 不能 be copy 也不能 be move
         // reserve() 已經一次配好記憶體了，push_back 只是填入指標，不會 reallocate。效能跟「直接開好」一樣
         for (size_t i = 0; i < block_size; ++i) {
             txn_status_.push_back(std::make_unique<TxnStatusEntry>());
@@ -229,33 +186,30 @@ public:
     // Returns false if blocking tx already EXECUTED (dependency resolved).
     // Caller (try_execute) should re-execute immediately if false.
     bool add_dependency(size_t txn_idx, size_t blocking_txn_idx) {
+        // Line 148: lock the dependency set of the blocking tx
         auto& dep = *txn_dependency_[blocking_txn_idx];
+        std::lock_guard<std::mutex> dep_lock(dep.mtx);
 
-        // 1. Set txn_idx status to ABORTING first
+        // Line 149-150: check if blocking tx already finished
         {
-            auto& entry = *txn_status_[txn_idx];
-            uint64_t expected = entry.state.load(std::memory_order_relaxed);
-            uint64_t desired;
-            do {
-                auto [inc, st] = TxnStatusEntry::unpack(expected);
-                desired = TxnStatusEntry::pack(inc, TxnStatus::ABORTING);
-            } while (!entry.state.compare_exchange_weak(expected, desired, std::memory_order_acq_rel));
+            auto& blocking_status = *txn_status_[blocking_txn_idx];
+            std::lock_guard<std::mutex> status_lock(blocking_status.mtx);
+            if (blocking_status.status == TxnStatus::EXECUTED) {
+                return false;  // dependency resolved, re-execute immediately
+            }
         }
 
-        // 2. Lock-free push to blocking tx's dependency stack
-        auto* new_node = new DepNode(txn_idx);
-        DepNode* old_head = dep.head.load(std::memory_order_acquire);
-        do {
-            if (old_head == CLOSED_MARKER) {
-                // Dependency resolved while we were setting up!
-                delete new_node;
-                set_ready_status(txn_idx); // revert status and increment incarnation
-                return false;
-            }
-            new_node->next = old_head;
-        } while (!dep.head.compare_exchange_weak(old_head, new_node, std::memory_order_release, std::memory_order_acquire));
+        // Line 151: set txn_idx status to ABORTING
+        {
+            auto& status = *txn_status_[txn_idx];
+            std::lock_guard<std::mutex> status_lock(status.mtx);
+            status.status = TxnStatus::ABORTING;
+        }
 
-        // 3. Decrement active tasks (this execution is suspended)
+        // Line 152: record the dependency
+        dep.dependents.insert(txn_idx);
+
+        // Line 153: decrement active tasks (this execution is suspended)
         num_active_tasks_.value.fetch_sub(1, std::memory_order_acq_rel);
 
         return true;
@@ -270,20 +224,21 @@ public:
                                           bool wrote_new_location) {
         // Line 166: set status to EXECUTED
         {
-            auto& entry = *txn_status_[txn_idx];
-            uint64_t expected = entry.state.load(std::memory_order_relaxed);
-            uint64_t desired;
-            do {
-                auto [inc, st] = TxnStatusEntry::unpack(expected);
-                desired = TxnStatusEntry::pack(inc, TxnStatus::EXECUTED);
-            } while (!entry.state.compare_exchange_weak(expected, desired, std::memory_order_acq_rel));
+            auto& status = *txn_status_[txn_idx];
+            std::lock_guard<std::mutex> lock(status.mtx);
+            status.status = TxnStatus::EXECUTED;
         }
 
-        // Line 167: Lock-free pop all dependents and close the stack
-        DepNode* list = txn_dependency_[txn_idx]->head.exchange(CLOSED_MARKER, std::memory_order_acq_rel);
+        // Line 167: swap out dependent txn indices
+        std::unordered_set<size_t> deps;
+        {
+            auto& dep = *txn_dependency_[txn_idx];
+            std::lock_guard<std::mutex> lock(dep.mtx);
+            deps.swap(dep.dependents);
+        }
 
         // Line 168: resume all dependents
-        resume_dependencies(list);
+        resume_dependencies(deps);
 
         // Line 169-173: schedule validation (paper's original logic)
         if (validation_idx_.value.load(std::memory_order_acquire)
@@ -307,10 +262,14 @@ public:
     // Returns true if this thread performed the abort.
     bool try_validation_abort(size_t txn_idx, size_t incarnation) {
         auto& entry = *txn_status_[txn_idx];
-        uint64_t expected = TxnStatusEntry::pack(static_cast<uint32_t>(incarnation), TxnStatus::EXECUTED);
-        uint64_t desired = TxnStatusEntry::pack(static_cast<uint32_t>(incarnation), TxnStatus::ABORTING);
-        // Line 178-179: Only the first thread to see (incarnation, EXECUTED) succeeds
-        return entry.state.compare_exchange_strong(expected, desired, std::memory_order_acq_rel);
+        std::lock_guard<std::mutex> lock(entry.mtx);
+        // Line 178: check status is still (incarnation, EXECUTED)
+        if (entry.incarnation == incarnation && entry.status == TxnStatus::EXECUTED) {
+            // Line 179: transition to ABORTING
+            entry.status = TxnStatus::ABORTING;
+            return true;
+        }
+        return false;
     }
 
     // --- Algorithm 5, Line 182-191: finish_validation() ---
@@ -387,17 +346,10 @@ private:
     std::optional<Version> try_incarnate(int txn_idx) {
         if (txn_idx < static_cast<int>(block_size_)) {
             auto& entry = *txn_status_[txn_idx];
-            uint64_t expected = entry.state.load(std::memory_order_relaxed);
-            while (true) {
-                auto [inc, st] = TxnStatusEntry::unpack(expected);
-                if (st == TxnStatus::READY_TO_EXECUTE) {
-                    uint64_t desired = TxnStatusEntry::pack(inc, TxnStatus::EXECUTING);
-                    if (entry.state.compare_exchange_weak(expected, desired, std::memory_order_acq_rel)) {
-                        return Version{static_cast<size_t>(txn_idx), inc};
-                    }
-                } else {
-                    break;
-                }
+            std::lock_guard<std::mutex> lock(entry.mtx);
+            if (entry.status == TxnStatus::READY_TO_EXECUTE) {
+                entry.status = TxnStatus::EXECUTING;
+                return Version{static_cast<size_t>(txn_idx), entry.incarnation};
             }
         }
         // Caller is responsible for decrementing num_active_tasks if this returns nullopt
@@ -434,9 +386,9 @@ private:
         int idx = validation_idx_.value.fetch_add(1, std::memory_order_acq_rel);
         if (idx < block_sz) {
             auto& entry = *txn_status_[idx];
-            auto [inc, st] = TxnStatusEntry::unpack(entry.state.load(std::memory_order_acquire));
-            if (st == TxnStatus::EXECUTED) {
-                return Version{static_cast<size_t>(idx), inc};
+            std::lock_guard<std::mutex> lock(entry.mtx);
+            if (entry.status == TxnStatus::EXECUTED) {
+                return Version{static_cast<size_t>(idx), entry.incarnation};
             }
         }
         num_active_tasks_.value.fetch_sub(1, std::memory_order_acq_rel);
@@ -446,32 +398,21 @@ private:
     // --- Algorithm 5, Line 155-158: set_ready_status() ---
     void set_ready_status(size_t txn_idx) {
         auto& entry = *txn_status_[txn_idx];
-        uint64_t expected = entry.state.load(std::memory_order_relaxed);
-        uint64_t desired;
-        do {
-            auto [inc, st] = TxnStatusEntry::unpack(expected);
-            desired = TxnStatusEntry::pack(inc + 1, TxnStatus::READY_TO_EXECUTE);
-        } while (!entry.state.compare_exchange_weak(expected, desired, std::memory_order_acq_rel));
+        std::lock_guard<std::mutex> lock(entry.mtx);
+        entry.incarnation += 1;
+        entry.status = TxnStatus::READY_TO_EXECUTE;
     }
 
     // --- Algorithm 5, Line 159-164: resume_dependencies() ---
-    void resume_dependencies(DepNode* list) {
-        if (!list || list == CLOSED_MARKER) return;
+    void resume_dependencies(const std::unordered_set<size_t>& deps) {
+        if (deps.empty()) return;
 
         size_t min_dep = block_size_;
-        DepNode* cur = list;
-        while (cur) {
-            size_t dep_idx = cur->txn_idx;
+        for (size_t dep_idx : deps) {
             set_ready_status(dep_idx);
             min_dep = std::min(min_dep, dep_idx);
-            
-            DepNode* next = cur->next;
-            delete cur;
-            cur = next;
         }
 
-        if (min_dep < block_size_) {
-            decrease_execution_idx(static_cast<int>(min_dep));
-        }
+        decrease_execution_idx(static_cast<int>(min_dep));
     }
 };

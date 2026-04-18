@@ -107,10 +107,28 @@ struct alignas(64) TxnStatusEntry {
     }
 };
 
-// Per-transaction dependency set (mutex-protected)
+// Per-transaction dependency set (Lock-free Treiber Stack)
+struct DepNode {
+    size_t txn_idx;
+    DepNode* next;
+    DepNode(size_t idx) : txn_idx(idx), next(nullptr) {}
+};
+
+// A special marker to indicate the dependency list is closed (transaction EXECUTED).
+static DepNode* const CLOSED_MARKER = reinterpret_cast<DepNode*>(static_cast<uintptr_t>(-1));
+
 struct TxnDependency {
-    std::mutex mtx;
-    std::unordered_set<size_t> dependents;  // txn indices that depend on this tx
+    std::atomic<DepNode*> head{nullptr};
+
+    ~TxnDependency() {
+        DepNode* cur = head.load(std::memory_order_relaxed);
+        if (cur == CLOSED_MARKER) cur = nullptr;
+        while (cur) {
+            DepNode* next = cur->next;
+            delete cur;
+            cur = next;
+        }
+    }
 };
 
 // RAII TaskGuard for num_active_tasks (Section 4)
@@ -211,20 +229,9 @@ public:
     // Returns false if blocking tx already EXECUTED (dependency resolved).
     // Caller (try_execute) should re-execute immediately if false.
     bool add_dependency(size_t txn_idx, size_t blocking_txn_idx) {
-        // Line 148: lock the dependency set of the blocking tx
         auto& dep = *txn_dependency_[blocking_txn_idx];
-        std::lock_guard<std::mutex> dep_lock(dep.mtx);
 
-        // Line 149-150: check if blocking tx already finished
-        {
-            auto& blocking_entry = *txn_status_[blocking_txn_idx];
-            auto [inc, status] = TxnStatusEntry::unpack(blocking_entry.state.load(std::memory_order_acquire));
-            if (status == TxnStatus::EXECUTED) {
-                return false;  // dependency resolved, re-execute immediately
-            }
-        }
-
-        // Line 151: set txn_idx status to ABORTING
+        // 1. Set txn_idx status to ABORTING first
         {
             auto& entry = *txn_status_[txn_idx];
             uint64_t expected = entry.state.load(std::memory_order_relaxed);
@@ -235,10 +242,20 @@ public:
             } while (!entry.state.compare_exchange_weak(expected, desired, std::memory_order_acq_rel));
         }
 
-        // Line 152: record the dependency
-        dep.dependents.insert(txn_idx);
+        // 2. Lock-free push to blocking tx's dependency stack
+        auto* new_node = new DepNode(txn_idx);
+        DepNode* old_head = dep.head.load(std::memory_order_acquire);
+        do {
+            if (old_head == CLOSED_MARKER) {
+                // Dependency resolved while we were setting up!
+                delete new_node;
+                set_ready_status(txn_idx); // revert status and increment incarnation
+                return false;
+            }
+            new_node->next = old_head;
+        } while (!dep.head.compare_exchange_weak(old_head, new_node, std::memory_order_release, std::memory_order_acquire));
 
-        // Line 153: decrement active tasks (this execution is suspended)
+        // 3. Decrement active tasks (this execution is suspended)
         num_active_tasks_.value.fetch_sub(1, std::memory_order_acq_rel);
 
         return true;
@@ -262,16 +279,11 @@ public:
             } while (!entry.state.compare_exchange_weak(expected, desired, std::memory_order_acq_rel));
         }
 
-        // Line 167: swap out dependent txn indices
-        std::unordered_set<size_t> deps;
-        {
-            auto& dep = *txn_dependency_[txn_idx];
-            std::lock_guard<std::mutex> lock(dep.mtx);
-            deps.swap(dep.dependents);
-        }
+        // Line 167: Lock-free pop all dependents and close the stack
+        DepNode* list = txn_dependency_[txn_idx]->head.exchange(CLOSED_MARKER, std::memory_order_acq_rel);
 
         // Line 168: resume all dependents
-        resume_dependencies(deps);
+        resume_dependencies(list);
 
         // Line 169-173: schedule validation (paper's original logic)
         if (validation_idx_.value.load(std::memory_order_acquire)
@@ -443,15 +455,23 @@ private:
     }
 
     // --- Algorithm 5, Line 159-164: resume_dependencies() ---
-    void resume_dependencies(const std::unordered_set<size_t>& deps) {
-        if (deps.empty()) return;
+    void resume_dependencies(DepNode* list) {
+        if (!list || list == CLOSED_MARKER) return;
 
         size_t min_dep = block_size_;
-        for (size_t dep_idx : deps) {
+        DepNode* cur = list;
+        while (cur) {
+            size_t dep_idx = cur->txn_idx;
             set_ready_status(dep_idx);
             min_dep = std::min(min_dep, dep_idx);
+            
+            DepNode* next = cur->next;
+            delete cur;
+            cur = next;
         }
 
-        decrease_execution_idx(static_cast<int>(min_dep));
+        if (min_dep < block_size_) {
+            decrease_execution_idx(static_cast<int>(min_dep));
+        }
     }
 };

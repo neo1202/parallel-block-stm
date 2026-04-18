@@ -23,7 +23,10 @@ find_package(Threads REQUIRED)
 
 # --- Core engine (header-only interface library) ---
 add_library(blockstm_core INTERFACE)
-target_include_directories(blockstm_core INTERFACE ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(blockstm_core INTERFACE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party  # picosha2.h (simulated VM compute)
+)
 target_link_libraries(blockstm_core INTERFACE Threads::Threads)
 
 # --- Third-party (doctest) ---

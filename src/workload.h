@@ -20,7 +20,10 @@
 //
 
 #include "transaction.h"
+#include "picosha2.h"
 
+#include <array>
+#include <cstring>
 #include <random>
 #include <unordered_map>
 
@@ -113,7 +116,7 @@ inline std::vector<Transaction> generate_workload(const WorkloadConfig& config) 
 
         size_t iters = config.compute_iters;
 
-        // Capture keys and compute_iters by value.
+        // Capture keys and iters by value.
         tx.logic = [keys, writes, iters](ExecutionContext& ctx) {
             // Read all keys
             std::vector<Value> vals;
@@ -122,10 +125,26 @@ inline std::vector<Transaction> generate_workload(const WorkloadConfig& config) 
                 vals.push_back(ctx.read(k));
             }
 
-            // Optional compute padding (fixed iteration count, not data-dependent)
-            volatile Value sink = 0;
-            for (size_t j = 0; j < iters; ++j) {
-                sink = sink + j * 17 + 3;
+            // Simulated VM compute: iterated SHA-256 over the read values.
+            // Models the CPU cost of Move VM bytecode execution, signature
+            // verification, and Merkle hashing in real blockchain transactions.
+            // Input depends on tx read-set so the compiler cannot optimize away.
+            if (iters > 0) {
+                std::array<uint8_t, 32> buf{};
+                Value v0 = vals[0];
+                Value v1 = vals[1];
+                std::memcpy(buf.data(),     &v0, sizeof(Value));
+                std::memcpy(buf.data() + 8, &v1, sizeof(Value));
+                std::array<uint8_t, 32> out{};
+                for (size_t j = 0; j < iters; ++j) {
+                    picosha2::hash256(buf.begin(), buf.end(),
+                                      out.begin(), out.end());
+                    buf = out;
+                }
+                // Force the hash result to be observable so the loop can't be dropped.
+                volatile uint64_t sink = 0;
+                std::memcpy((void*)&sink, buf.data(), sizeof(uint64_t));
+                (void)sink;
             }
 
             // Write: first two keys do a +1/-1 transfer (balance conserving)

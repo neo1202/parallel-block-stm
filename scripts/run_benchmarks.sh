@@ -70,6 +70,15 @@ run_sweep() {
     ./"$DIR_RELEASE"/bench/bench_scaling --threads 1,2,4,8 --block-size 500000 --accounts 10 --runs 5
 }
 
+# --- Heavy Workload: simulate VM execution ---
+run_heavy() {
+    build_release
+    echo ""
+    echo -e "${YELLOW}=== Heavy Workload (Simulated VM): 50k txs, 500 accounts ===${NC}"
+    echo -e "${YELLOW}This demonstrates the true parallel scaling power of Block-STM when transactions are complex.${NC}"
+    ./"$DIR_RELEASE"/bench/bench_scaling --threads 1,2,4,8 --block-size 50000 --accounts 500 --compute 100000 --runs 5
+}
+
 # --- Record: save outputs & plot ---
 run_record() {
     build_release
@@ -91,6 +100,10 @@ run_record() {
     ./"$DIR_RELEASE"/bench/bench_scaling --threads 1,2,4,8 --block-size 500000 --accounts 500 --runs 5 > "${OUT_DIR}/sweep_mid.csv"
     ./"$DIR_RELEASE"/bench/bench_scaling --threads 1,2,4,8 --block-size 500000 --accounts 10 --runs 5 > "${OUT_DIR}/sweep_high.csv"
     
+    # Heavy
+    echo -e "${YELLOW}Running heavy workload benchmark...${NC}"
+    ./"$DIR_RELEASE"/bench/bench_scaling --threads 1,2,4,8 --block-size 50000 --accounts 500 --compute 100000 --runs 5 > "${OUT_DIR}/heavy.csv"
+    
     # Combine Sweep CSVs
     head -n 1 "${OUT_DIR}/sweep_low.csv" > "${OUT_DIR}/sweep.csv"
     tail -n +2 "${OUT_DIR}/sweep_low.csv" >> "${OUT_DIR}/sweep.csv"
@@ -100,7 +113,7 @@ run_record() {
 
     # Plot
     echo -e "${YELLOW}Plotting results...${NC}"
-    python3 scripts/plot_results.py "${OUT_DIR}/scaling.csv" "${OUT_DIR}/sweep.csv" "${OUT_DIR}"
+    python3 scripts/plot_results.py "${OUT_DIR}/scaling.csv" "${OUT_DIR}/sweep.csv" "${OUT_DIR}/heavy.csv" "${OUT_DIR}"
     
     echo -e "${GREEN}Done! Records and plots saved to ${OUT_DIR}${NC}"
 }

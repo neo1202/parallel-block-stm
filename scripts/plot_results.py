@@ -127,6 +127,31 @@ def plot_sweep(csv_file, out_dir):
     plt.savefig(os.path.join(out_dir, 'sweep_throughput.png'))
     plt.close()
 
+def plot_heavy(csv_file, out_dir):
+    data = read_csv(csv_file)
+    if not data:
+        return
+    threads = [int(row['threads']) for row in data]
+    throughputs = [float(row['throughput']) for row in data]
+    
+    # Normalizing to speedup
+    t1_throughput = throughputs[threads.index(1)] if 1 in threads else throughputs[0]
+    speedups = [t / t1_throughput for t in throughputs]
+
+    # Plot Speedup
+    plt.figure(figsize=(8, 5))
+    plt.plot(threads, speedups, marker='o', linestyle='-', color='r', label='Heavy Workload (VM Sim)')
+    plt.plot(threads, threads, linestyle='--', color='gray', label='Ideal Scaling')
+    plt.title('Heavy Workload Benchmark (Speedup)')
+    plt.xlabel('Number of Threads')
+    plt.ylabel('Speedup over Sequential (1 Thread)')
+    plt.xticks(threads)
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, 'heavy_speedup.png'))
+    plt.close()
+
 if __name__ == '__main__':
     if len(sys.argv) < 3:
         print("Usage: python3 plot_results.py <csv_file1> [csv_file2...] <out_dir>")
@@ -148,3 +173,5 @@ if __name__ == '__main__':
             plot_scaling(f, out_dir)
         elif 'sweep' in os.path.basename(f):
             plot_sweep(f, out_dir)
+        elif 'heavy' in os.path.basename(f):
+            plot_heavy(f, out_dir)

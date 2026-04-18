@@ -64,20 +64,22 @@ struct BenchConfig {
     size_t accounts   = 1000;
     uint64_t seed     = 42;
     int runs          = 5;
+    size_t compute_iters = 0;
 };
 
 static BenchConfig parse_args(int argc, char* argv[]) {
     BenchConfig cfg;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "--threads" && i + 1 < argc)     cfg.threads    = parse_int_list(argv[++i]);
-        else if (arg == "--block-size" && i + 1 < argc) cfg.block_size = std::stoull(argv[++i]);
-        else if (arg == "--accounts" && i + 1 < argc)   cfg.accounts   = std::stoull(argv[++i]);
-        else if (arg == "--seed" && i + 1 < argc)       cfg.seed       = std::stoull(argv[++i]);
-        else if (arg == "--runs" && i + 1 < argc)       cfg.runs       = std::stoi(argv[++i]);
+        if (arg == "--threads" && i + 1 < argc)         cfg.threads       = parse_int_list(argv[++i]);
+        else if (arg == "--block-size" && i + 1 < argc) cfg.block_size    = std::stoull(argv[++i]);
+        else if (arg == "--accounts" && i + 1 < argc)   cfg.accounts      = std::stoull(argv[++i]);
+        else if (arg == "--seed" && i + 1 < argc)       cfg.seed          = std::stoull(argv[++i]);
+        else if (arg == "--runs" && i + 1 < argc)       cfg.runs          = std::stoi(argv[++i]);
+        else if (arg == "--compute" && i + 1 < argc)    cfg.compute_iters = std::stoull(argv[++i]);
         else if (arg == "--help") {
             std::cout << "Usage: bench_scaling [--threads 1,2,4,8] [--block-size N] "
-                         "[--accounts N] [--seed N] [--runs N]\n";
+                         "[--accounts N] [--seed N] [--runs N] [--compute N]\n";
             std::exit(0);
         }
     }
@@ -130,7 +132,8 @@ int main(int argc, char* argv[]) {
     WorkloadConfig wl_cfg{
         .num_txs = cfg.block_size,
         .num_accounts = cfg.accounts,
-        .seed = cfg.seed
+        .seed = cfg.seed,
+        .compute_iters = cfg.compute_iters
     };
     auto block = generate_workload(wl_cfg);
     auto initial_state = generate_initial_state(cfg.accounts);

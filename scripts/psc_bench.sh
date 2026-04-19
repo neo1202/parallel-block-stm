@@ -1,5 +1,5 @@
 #!/bin/bash
-# psc_bench.sh - run exp A + exp B for V0 (mutex) and V1 (lock-free chain).
+# psc_bench.sh - run exp A + exp B across all tracked versions.
 # submit:  sbatch scripts/psc_bench.sh
 # output:  benchmark_records/psc_<jobid>_VX/exp_{a,b}.csv
 
@@ -17,7 +17,7 @@ export HOSTNAME=$(hostname)
 cd "$SLURM_SUBMIT_DIR"
 module load gcc/13.3.1-p20240614
 
-# fixed workload - calibrated locally so LF wins by ~15% on hot/cold
+# workload params (see docs/experiments.md for rationale)
 BLOCK=10000
 READS=2
 WRITES=2
@@ -25,28 +25,39 @@ COMPUTE=200
 RUNS=10
 THREADS="1,2,4,8,16,32,64,128"
 
-# hot/cold
 HOT_RATIO=0.2
 HOT_ACCOUNTS=50
 HOT_KEYS=1
 
-# build mutex (V0) and lock-free-chain (V1) side by side
-MUTEX_REF="8239b3f"
-DIR_MUTEX="build-release-mutex"
-DIR_LF="build-release-lf"
-
-echo "[build] mutex (V0) @ $MUTEX_REF"
-git checkout $MUTEX_REF -- src/mvmemory.h
-cmake -S . -B "$DIR_MUTEX" -DCMAKE_BUILD_TYPE=Release > /dev/null 2>&1
-cmake --build "$DIR_MUTEX" -j > /dev/null 2>&1
-git checkout HEAD -- src/mvmemory.h
-
-echo "[build] lock-free chain (V1) @ HEAD"
-cmake -S . -B "$DIR_LF" -DCMAKE_BUILD_TYPE=Release > /dev/null 2>&1
-cmake --build "$DIR_LF" -j > /dev/null 2>&1
+# versions - each one differs only in src/mvmemory.h.
+# V0: pre-partner mutex chain. V1: lock-free chain without backoff.
+# V2: lock-free chain with backoff (current HEAD).
+MVMEM_V0="8239b3f"
+MVMEM_V1="f54ebfb"
+# V2 uses HEAD
 
 GIT_HASH=$(git rev-parse --short HEAD)
 OUT_BASE="benchmark_records/psc_${SLURM_JOB_ID}"
+
+build_version() {
+    local tag=$1 ref=$2 dir=$3
+    echo "[build] ${tag} (mvmemory.h @ ${ref})"
+    git checkout "$ref" -- src/mvmemory.h
+    cmake -S . -B "$dir" -DCMAKE_BUILD_TYPE=Release > /dev/null 2>&1
+    cmake --build "$dir" -j > /dev/null 2>&1
+    git checkout HEAD -- src/mvmemory.h
+}
+
+DIR_V0="build-release-V0"
+DIR_V1="build-release-V1"
+DIR_V2="build-release-V2"
+
+build_version "V0-mutex"             "$MVMEM_V0" "$DIR_V0"
+build_version "V1-lfchain-nobackoff" "$MVMEM_V1" "$DIR_V1"
+# V2 is HEAD - no checkout needed
+echo "[build] V2-lfchain-backoff (mvmemory.h @ HEAD)"
+cmake -S . -B "$DIR_V2" -DCMAKE_BUILD_TYPE=Release > /dev/null 2>&1
+cmake --build "$DIR_V2" -j > /dev/null 2>&1
 
 write_header() {
     local csv=$1 ver=$2 expid=$3 expnote=$4
@@ -69,7 +80,6 @@ run_exp_a() {
     echo "threads,accounts,time_ms,throughput" >> "$csv"
 
     for acc in 2 10 100 1000 10000; do
-        # bench_scaling prints a header + one row per thread count. drop header, keep rows, remap columns to match ours.
         "$binary" --threads $THREADS --block-size $BLOCK \
             --reads $READS --writes $WRITES --compute $COMPUTE --runs $RUNS \
             --accounts $acc \
@@ -100,13 +110,15 @@ run_exp_b() {
 
 echo ""
 echo "=== exp A - contention sweep ==="
-run_exp_a V0-mutex   "./${DIR_MUTEX}/bench/bench_scaling"
-run_exp_a V1-lfchain "./${DIR_LF}/bench/bench_scaling"
+run_exp_a V0-mutex             "./${DIR_V0}/bench/bench_scaling"
+run_exp_a V1-lfchain-nobackoff "./${DIR_V1}/bench/bench_scaling"
+run_exp_a V2-lfchain-backoff   "./${DIR_V2}/bench/bench_scaling"
 
 echo ""
 echo "=== exp B - dex hot/cold ==="
-run_exp_b V0-mutex   "./${DIR_MUTEX}/bench/bench_scaling"
-run_exp_b V1-lfchain "./${DIR_LF}/bench/bench_scaling"
+run_exp_b V0-mutex             "./${DIR_V0}/bench/bench_scaling"
+run_exp_b V1-lfchain-nobackoff "./${DIR_V1}/bench/bench_scaling"
+run_exp_b V2-lfchain-backoff   "./${DIR_V2}/bench/bench_scaling"
 
 echo ""
 echo "done. outputs under ${OUT_BASE}_*"

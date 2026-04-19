@@ -65,6 +65,8 @@ struct BenchConfig {
     uint64_t seed     = 42;
     int runs          = 5;
     size_t compute_iters = 0;
+    double hot_ratio     = 0.0;
+    size_t hot_accounts  = 10;
 };
 
 static BenchConfig parse_args(int argc, char* argv[]) {
@@ -77,9 +79,12 @@ static BenchConfig parse_args(int argc, char* argv[]) {
         else if (arg == "--seed" && i + 1 < argc)       cfg.seed          = std::stoull(argv[++i]);
         else if (arg == "--runs" && i + 1 < argc)       cfg.runs          = std::stoi(argv[++i]);
         else if (arg == "--compute" && i + 1 < argc)    cfg.compute_iters = std::stoull(argv[++i]);
+        else if (arg == "--hot-ratio" && i + 1 < argc)  cfg.hot_ratio     = std::stod(argv[++i]);
+        else if (arg == "--hot-accounts" && i + 1 < argc) cfg.hot_accounts = std::stoull(argv[++i]);
         else if (arg == "--help") {
             std::cout << "Usage: bench_scaling [--threads 1,2,4,8] [--block-size N] "
-                         "[--accounts N] [--seed N] [--runs N] [--compute N]\n";
+                         "[--accounts N] [--seed N] [--runs N] [--compute N] "
+                         "[--hot-ratio 0.2] [--hot-accounts 10]\n";
             std::exit(0);
         }
     }
@@ -133,7 +138,9 @@ int main(int argc, char* argv[]) {
         .num_txs = cfg.block_size,
         .num_accounts = cfg.accounts,
         .seed = cfg.seed,
-        .compute_iters = cfg.compute_iters
+        .compute_iters = cfg.compute_iters,
+        .hot_ratio = cfg.hot_ratio,
+        .hot_accounts = cfg.hot_accounts
     };
     auto block = generate_workload(wl_cfg);
     auto initial_state = generate_initial_state(cfg.accounts);

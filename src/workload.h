@@ -42,6 +42,14 @@ struct WorkloadConfig {
     size_t reads_per_tx  = 2;     // number of keys each tx reads
     size_t writes_per_tx = 2;     // number of keys each tx writes (<= reads_per_tx)
     size_t compute_iters = 0;     // extra arithmetic iterations to simulate compute cost
+
+    // --- Hot/cold workload (simulates real blockchain: DEX pools, hot NFT contracts) ---
+    // When hot_ratio > 0, a fraction of transactions access hot accounts.
+    // Hot accounts are the first `hot_accounts` account IDs (0 to hot_accounts-1).
+    // hot_ratio = 0.0 (default) -> fully uniform access across all accounts.
+    // hot_ratio = 0.2, hot_accounts=10 -> 20% of tx keys are drawn from hot pool of 10.
+    double hot_ratio    = 0.0;
+    size_t hot_accounts = 10;
 };
 
 // --- generate_initial_state ---
@@ -69,6 +77,32 @@ inline std::vector<Key> pick_distinct_keys(
     keys.reserve(count);
     while (keys.size() < count) {
         Key k = dist(rng);
+        bool dup = false;
+        for (Key existing : keys) {
+            if (existing == k) { dup = true; break; }
+        }
+        if (!dup) keys.push_back(k);
+    }
+    return keys;
+}
+
+// --- pick_distinct_keys_hotcold ---
+// Each key has probability `hot_ratio` of being drawn from the hot pool
+// [0, hot_accounts), and (1 - hot_ratio) from the cold pool [hot_accounts, num_accounts).
+// Ensures all keys are distinct.
+inline std::vector<Key> pick_distinct_keys_hotcold(
+    size_t count, size_t num_accounts, size_t hot_accounts,
+    double hot_ratio, std::mt19937_64& rng
+) {
+    std::uniform_int_distribution<Key> hot_dist(0, static_cast<Key>(hot_accounts - 1));
+    std::uniform_int_distribution<Key> cold_dist(
+        static_cast<Key>(hot_accounts), static_cast<Key>(num_accounts - 1));
+    std::uniform_real_distribution<double> coin(0.0, 1.0);
+
+    std::vector<Key> keys;
+    keys.reserve(count);
+    while (keys.size() < count) {
+        Key k = (coin(rng) < hot_ratio) ? hot_dist(rng) : cold_dist(rng);
         bool dup = false;
         for (Key existing : keys) {
             if (existing == k) { dup = true; break; }
@@ -106,9 +140,17 @@ inline std::vector<Transaction> generate_workload(const WorkloadConfig& config) 
     std::vector<Transaction> block;
     block.reserve(config.num_txs);
 
+    // Hot/cold only takes effect when hot_ratio > 0 AND hot_accounts < num_accounts
+    bool use_hotcold = (config.hot_ratio > 0.0)
+                    && (config.hot_accounts > 0)
+                    && (config.hot_accounts < config.num_accounts);
+
     for (size_t i = 0; i < config.num_txs; ++i) {
         // Pick `reads` distinct accounts. First `writes` of them are also written.
-        auto keys = pick_distinct_keys(reads, config.num_accounts, rng);
+        auto keys = use_hotcold
+            ? pick_distinct_keys_hotcold(reads, config.num_accounts,
+                                         config.hot_accounts, config.hot_ratio, rng)
+            : pick_distinct_keys(reads, config.num_accounts, rng);
 
         Transaction tx;
         tx.read_keys = keys;

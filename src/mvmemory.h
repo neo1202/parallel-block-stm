@@ -45,6 +45,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <thread>  // std::this_thread::yield for unknown architectures
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -158,6 +159,13 @@ struct VersionChain {
     //   - existing node if one with the same txn_idx was found (new_node is deleted)
     ChainNode* upsert(ChainNode* new_node) {
         size_t txn_idx = new_node->txn_idx;
+        // Exponential backoff state: count pause iterations after each CAS failure.
+        // On high-contention chains with many concurrent CAS, naive retry causes
+        // a "retry storm" that wastes CPU and invalidates cache lines. Backoff
+        // lets other writers make progress before we try again.
+        int backoff_spins = 1;
+        const int backoff_cap = 1024;
+
         while (true) {
             ChainNode* prev = nullptr;
             ChainNode* cur = head.load(std::memory_order_acquire);
@@ -178,18 +186,27 @@ struct VersionChain {
             // Not found, insert new_node between prev and cur
             new_node->next.store(cur, std::memory_order_relaxed);
 
-            if (prev == nullptr) {
-                if (head.compare_exchange_weak(cur, new_node,
-                        std::memory_order_release, std::memory_order_acquire)) {
-                    return new_node;
-                }
-            } else {
-                if (prev->next.compare_exchange_weak(cur, new_node,
-                        std::memory_order_release, std::memory_order_acquire)) {
-                    return new_node;
-                }
+            bool ok = (prev == nullptr)
+                ? head.compare_exchange_weak(cur, new_node,
+                    std::memory_order_release, std::memory_order_acquire)
+                : prev->next.compare_exchange_weak(cur, new_node,
+                    std::memory_order_release, std::memory_order_acquire);
+
+            if (ok) return new_node;
+
+            // CAS failed - back off with CPU pause before retrying from head.
+            // `pause` (x86) / `yield` (ARM) hints the CPU to reduce speculation
+            // and power so other hardware threads get more cycles.
+            for (int i = 0; i < backoff_spins; ++i) {
+#if defined(__x86_64__) || defined(__i386__)
+                __asm__ __volatile__("pause" ::: "memory");
+#elif defined(__aarch64__) || defined(__arm__)
+                __asm__ __volatile__("yield" ::: "memory");
+#else
+                std::this_thread::yield();
+#endif
             }
-            // CAS failed, retry from head (keep new_node for reuse)
+            if (backoff_spins < backoff_cap) backoff_spins *= 2;
         }
     }
 

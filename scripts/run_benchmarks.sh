@@ -7,6 +7,7 @@
 #   ./scripts/run_benchmarks.sh speed      main benchmark: 1,2,4,8 threads
 #   ./scripts/run_benchmarks.sh sweep      contention sweep: low/mid/high
 #   ./scripts/run_benchmarks.sh record     run benchmarks, save CSVs & plots
+#   ./scripts/run_benchmarks.sh main_bench compare mutex vs lock-free VersionChain
 #
 # =============================================================================
 
@@ -118,6 +119,55 @@ run_record() {
     echo -e "${GREEN}Done! Records and plots saved to ${OUT_DIR}${NC}"
 }
 
+# --- Main bench: compare mutex vs lock-free VersionChain on main workload ---
+#
+# Main workload (high contention to expose lock-free advantage):
+#   block_size = 10000   (matches paper's main experiments)
+#   accounts   = 100     (high contention - ~100 writes per account)
+#   compute    = 200     (sequential ~70us/tx, moderate VM simulation)
+#   2 reads + 2 writes per tx
+#
+# Builds two binaries from the same source, swapping only src/mvmemory.h:
+#   - MUTEX   : VersionChain from commit 8239b3f (pre-lock-free)
+#   - LOCKFREE: VersionChain at current HEAD
+run_main_bench() {
+    # Require clean mvmemory.h
+    if ! git diff --quiet -- src/mvmemory.h; then
+        echo -e "${YELLOW}ERROR: src/mvmemory.h has uncommitted changes. Commit or stash first.${NC}"
+        exit 1
+    fi
+
+    BLOCK=10000
+    ACCOUNTS=100
+    COMPUTE=200
+    RUNS=5
+    THREADS="1,2,4,8"
+
+    DIR_MUTEX="build-release-mutex"
+    DIR_LF="build-release-lf"
+
+    MUTEX_REF="8239b3f"  # commit with pre-partner mutex VersionChain
+
+    echo -e "${YELLOW}[1/2] Building MUTEX baseline (mvmemory.h @ $MUTEX_REF)...${NC}"
+    git checkout $MUTEX_REF -- src/mvmemory.h
+    cmake -S . -B "$DIR_MUTEX" -DCMAKE_BUILD_TYPE=Release -DSANITIZER="" > /dev/null 2>&1
+    cmake --build "$DIR_MUTEX" > /dev/null 2>&1
+    git checkout HEAD -- src/mvmemory.h
+
+    echo -e "${YELLOW}[2/2] Building LOCK-FREE VersionChain (mvmemory.h @ HEAD)...${NC}"
+    cmake -S . -B "$DIR_LF" -DCMAKE_BUILD_TYPE=Release -DSANITIZER="" > /dev/null 2>&1
+    cmake --build "$DIR_LF" > /dev/null 2>&1
+
+    echo ""
+    echo -e "${GREEN}Main workload: block=$BLOCK, accounts=$ACCOUNTS, compute=$COMPUTE, runs=$RUNS${NC}"
+    echo ""
+    echo -e "${YELLOW}=== MUTEX VersionChain (baseline) ===${NC}"
+    ./"$DIR_MUTEX"/bench/bench_scaling --threads $THREADS --block-size $BLOCK --accounts $ACCOUNTS --compute $COMPUTE --runs $RUNS
+    echo ""
+    echo -e "${YELLOW}=== LOCK-FREE VersionChain ===${NC}"
+    ./"$DIR_LF"/bench/bench_scaling --threads $THREADS --block-size $BLOCK --accounts $ACCOUNTS --compute $COMPUTE --runs $RUNS
+}
+
 # --- Main ---
 case "${1:-default}" in
     default)
@@ -132,12 +182,16 @@ case "${1:-default}" in
     record)
         run_record
         ;;
+    main_bench)
+        run_main_bench
+        ;;
     *)
-        echo "Usage: $0 [speed|sweep|record]"
+        echo "Usage: $0 [speed|sweep|record|main_bench]"
         echo ""
-        echo "  (no args)   Correctness tests (parallel == sequential)"
-        echo "  speed       Main benchmark: 500k txs, 1/2/4/8 threads"
-        echo "  sweep       Contention sweep: low/mid/high x 1/2/4/8 threads"
-        echo "  record      Run benchmarks, save CSVs and generate plots"
+        echo "  (no args)    Correctness tests (parallel == sequential)"
+        echo "  speed        Main benchmark: 500k txs, 1/2/4/8 threads"
+        echo "  sweep        Contention sweep: low/mid/high x 1/2/4/8 threads"
+        echo "  record       Run benchmarks, save CSVs and generate plots"
+        echo "  main_bench   Compare mutex vs lock-free VersionChain (main workload)"
         ;;
 esac

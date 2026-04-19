@@ -64,9 +64,12 @@ struct BenchConfig {
     size_t accounts   = 1000;
     uint64_t seed     = 42;
     int runs          = 5;
-    size_t compute_iters = 0;
-    double hot_ratio     = 0.0;
-    size_t hot_accounts  = 10;
+    size_t reads_per_tx     = 2;
+    size_t writes_per_tx    = 2;
+    size_t compute_iters    = 0;
+    double hot_tx_ratio     = 0.0;
+    size_t hot_accounts     = 50;
+    size_t hot_keys_per_tx  = 1;
 };
 
 static BenchConfig parse_args(int argc, char* argv[]) {
@@ -78,13 +81,16 @@ static BenchConfig parse_args(int argc, char* argv[]) {
         else if (arg == "--accounts" && i + 1 < argc)   cfg.accounts      = std::stoull(argv[++i]);
         else if (arg == "--seed" && i + 1 < argc)       cfg.seed          = std::stoull(argv[++i]);
         else if (arg == "--runs" && i + 1 < argc)       cfg.runs          = std::stoi(argv[++i]);
-        else if (arg == "--compute" && i + 1 < argc)    cfg.compute_iters = std::stoull(argv[++i]);
-        else if (arg == "--hot-ratio" && i + 1 < argc)  cfg.hot_ratio     = std::stod(argv[++i]);
-        else if (arg == "--hot-accounts" && i + 1 < argc) cfg.hot_accounts = std::stoull(argv[++i]);
+        else if (arg == "--reads" && i + 1 < argc)      cfg.reads_per_tx   = std::stoull(argv[++i]);
+        else if (arg == "--writes" && i + 1 < argc)     cfg.writes_per_tx  = std::stoull(argv[++i]);
+        else if (arg == "--compute" && i + 1 < argc)    cfg.compute_iters  = std::stoull(argv[++i]);
+        else if (arg == "--hot-tx-ratio" && i + 1 < argc)  cfg.hot_tx_ratio    = std::stod(argv[++i]);
+        else if (arg == "--hot-accounts" && i + 1 < argc)  cfg.hot_accounts    = std::stoull(argv[++i]);
+        else if (arg == "--hot-keys" && i + 1 < argc)      cfg.hot_keys_per_tx = std::stoull(argv[++i]);
         else if (arg == "--help") {
             std::cout << "Usage: bench_scaling [--threads 1,2,4,8] [--block-size N] "
-                         "[--accounts N] [--seed N] [--runs N] [--compute N] "
-                         "[--hot-ratio 0.2] [--hot-accounts 10]\n";
+                         "[--accounts N] [--reads N] [--writes N] [--seed N] [--runs N] "
+                         "[--compute N] [--hot-tx-ratio 0.2] [--hot-accounts 50] [--hot-keys 1]\n";
             std::exit(0);
         }
     }
@@ -138,9 +144,12 @@ int main(int argc, char* argv[]) {
         .num_txs = cfg.block_size,
         .num_accounts = cfg.accounts,
         .seed = cfg.seed,
+        .reads_per_tx = cfg.reads_per_tx,
+        .writes_per_tx = cfg.writes_per_tx,
         .compute_iters = cfg.compute_iters,
-        .hot_ratio = cfg.hot_ratio,
-        .hot_accounts = cfg.hot_accounts
+        .hot_tx_ratio = cfg.hot_tx_ratio,
+        .hot_accounts = cfg.hot_accounts,
+        .hot_keys_per_tx = cfg.hot_keys_per_tx
     };
     auto block = generate_workload(wl_cfg);
     auto initial_state = generate_initial_state(cfg.accounts);

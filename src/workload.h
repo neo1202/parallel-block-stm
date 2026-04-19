@@ -1,23 +1,8 @@
 #pragma once
 
-// workload.h - Synthetic workload generator with tunable contention
-//
-// Generates blocks of transactions for testing and benchmarking.
-// Supports configurable read/write ratios to simulate different workload
-// patterns from the Block-STM paper (Section 4.1):
-//
-//   P2P transfer (default):  2 reads, 2 writes - baseline, like Aptos transfers
-//   Read-heavy (DEX-like):   8 reads, 2 writes - price lookups with few updates
-//   Write-heavy (batch):     2 reads, 8 writes - bulk state mutations
-//   Compute-heavy:           + compute_iters    - simulate VM execution cost
-//
-// Contention is controlled by num_accounts (fewer = more conflicts).
-// All workloads conserve total balance (zero-sum transfers).
-//
-// DESIGN DECISION: Fixed seed for reproducibility.
-//   Every generated workload is fully determined by the seed. If a test fails,
-//   you can reproduce the exact same block by reusing the seed.
-//
+// workload.h - synthetic block generator. Contention controlled by
+// num_accounts; hot/cold is optional (DEX-style). All txs are +1/-1
+// transfers plus optional compute padding via iterated SHA-256.
 
 #include "transaction.h"
 #include "picosha2.h"
@@ -27,14 +12,6 @@
 #include <random>
 #include <unordered_map>
 
-// --- WorkloadConfig ---
-// Parameters for workload generation.
-//
-// Workload patterns (matching Block-STM paper Section 4.1):
-//   P2P transfer:  reads_per_tx=2, writes_per_tx=2  (default)
-//   Read-heavy:    reads_per_tx=8, writes_per_tx=2   (DEX price queries)
-//   Write-heavy:   reads_per_tx=2, writes_per_tx=8   (batch updates)
-//   Compute-heavy: reads_per_tx=2, writes_per_tx=2, compute_iters=1000
 struct WorkloadConfig {
     size_t num_txs;                // number of transactions in the block
     size_t num_accounts;           // number of accounts (fewer = more contention)
@@ -43,18 +20,16 @@ struct WorkloadConfig {
     size_t writes_per_tx = 2;     // number of keys each tx writes (<= reads_per_tx)
     size_t compute_iters = 0;     // extra arithmetic iterations to simulate compute cost
 
-    // --- Hot/cold workload (simulates real blockchain: DEX pools, hot NFT contracts) ---
-    // When hot_ratio > 0, a fraction of transactions access hot accounts.
-    // Hot accounts are the first `hot_accounts` account IDs (0 to hot_accounts-1).
-    // hot_ratio = 0.0 (default) -> fully uniform access across all accounts.
-    // hot_ratio = 0.2, hot_accounts=10 -> 20% of tx keys are drawn from hot pool of 10.
-    double hot_ratio    = 0.0;
-    size_t hot_accounts = 10;
+    // hot/cold workload - simulates DEX-style access pattern
+    // hot_tx_ratio fraction of txs are "hot": first hot_keys_per_tx of their keys
+    // come from the hot pool (IDs 0..hot_accounts-1), the rest come from cold.
+    // the remaining txs use only cold accounts.
+    // hot_tx_ratio=0 disables this (default uniform pick).
+    double hot_tx_ratio    = 0.0;
+    size_t hot_accounts    = 50;
+    size_t hot_keys_per_tx = 1;
 };
 
-// --- generate_initial_state ---
-// Creates the initial state: each account starts with the given balance.
-// Returns: { 0: balance, 1: balance, ..., (num_accounts-1): balance }
 inline std::unordered_map<Key, Value> generate_initial_state(
     size_t num_accounts,
     Value initial_balance = 1000
@@ -67,8 +42,6 @@ inline std::unordered_map<Key, Value> generate_initial_state(
     return state;
 }
 
-// --- pick_distinct_keys ---
-// Helper: pick `count` distinct random keys from [0, num_accounts).
 inline std::vector<Key> pick_distinct_keys(
     size_t count, size_t num_accounts, std::mt19937_64& rng
 ) {
@@ -86,47 +59,36 @@ inline std::vector<Key> pick_distinct_keys(
     return keys;
 }
 
-// --- pick_distinct_keys_hotcold ---
-// Each key has probability `hot_ratio` of being drawn from the hot pool
-// [0, hot_accounts), and (1 - hot_ratio) from the cold pool [hot_accounts, num_accounts).
-// Ensures all keys are distinct.
-inline std::vector<Key> pick_distinct_keys_hotcold(
+// pick `count` distinct keys: first `n_hot` from hot pool, rest from cold pool.
+// if n_hot == 0, everything is cold.
+inline std::vector<Key> pick_keys_hot_cold_tx(
     size_t count, size_t num_accounts, size_t hot_accounts,
-    double hot_ratio, std::mt19937_64& rng
+    size_t n_hot, std::mt19937_64& rng
 ) {
     std::uniform_int_distribution<Key> hot_dist(0, static_cast<Key>(hot_accounts - 1));
     std::uniform_int_distribution<Key> cold_dist(
         static_cast<Key>(hot_accounts), static_cast<Key>(num_accounts - 1));
-    std::uniform_real_distribution<double> coin(0.0, 1.0);
 
     std::vector<Key> keys;
     keys.reserve(count);
+
+    auto push_unique = [&](Key k) {
+        for (Key existing : keys) if (existing == k) return false;
+        keys.push_back(k);
+        return true;
+    };
+
+    // hot keys first
+    while (keys.size() < n_hot) {
+        push_unique(hot_dist(rng));
+    }
+    // then fill with cold keys
     while (keys.size() < count) {
-        Key k = (coin(rng) < hot_ratio) ? hot_dist(rng) : cold_dist(rng);
-        bool dup = false;
-        for (Key existing : keys) {
-            if (existing == k) { dup = true; break; }
-        }
-        if (!dup) keys.push_back(k);
+        push_unique(cold_dist(rng));
     }
     return keys;
 }
 
-// --- generate_workload ---
-// Generates a block of transactions with configurable read/write counts.
-//
-// Default (reads_per_tx=2, writes_per_tx=2): p2p transfer, same as paper.
-// Read-heavy (reads_per_tx=8, writes_per_tx=2): reads extra accounts,
-//   writes only the first two (transfer between them).
-// Write-heavy (reads_per_tx=2, writes_per_tx=8): reads two accounts,
-//   writes to multiple accounts (distributes value).
-//
-// Balance conservation: the first two keys always do a +1/-1 transfer.
-// Extra writes distribute zero-sum across remaining write keys.
-// Extra reads are read-only (no write to those keys).
-//
-// compute_iters: adds dummy arithmetic to simulate VM compute cost.
-//   Loop count is fixed at generation time (not data-dependent).
 inline std::vector<Transaction> generate_workload(const WorkloadConfig& config) {
     std::mt19937_64 rng(config.seed);
 
@@ -140,17 +102,26 @@ inline std::vector<Transaction> generate_workload(const WorkloadConfig& config) 
     std::vector<Transaction> block;
     block.reserve(config.num_txs);
 
-    // Hot/cold only takes effect when hot_ratio > 0 AND hot_accounts < num_accounts
-    bool use_hotcold = (config.hot_ratio > 0.0)
+    // hot/cold kicks in only when the pool sizes and ratio make sense
+    bool use_hotcold = (config.hot_tx_ratio > 0.0)
                     && (config.hot_accounts > 0)
                     && (config.hot_accounts < config.num_accounts);
+    std::uniform_real_distribution<double> coin(0.0, 1.0);
+    size_t hot_keys = std::min(config.hot_keys_per_tx, reads);
 
     for (size_t i = 0; i < config.num_txs; ++i) {
-        // Pick `reads` distinct accounts. First `writes` of them are also written.
-        auto keys = use_hotcold
-            ? pick_distinct_keys_hotcold(reads, config.num_accounts,
-                                         config.hot_accounts, config.hot_ratio, rng)
-            : pick_distinct_keys(reads, config.num_accounts, rng);
+        std::vector<Key> keys;
+        if (use_hotcold && coin(rng) < config.hot_tx_ratio) {
+            // this one is a hot tx -> first hot_keys come from hot pool
+            keys = pick_keys_hot_cold_tx(reads, config.num_accounts,
+                                         config.hot_accounts, hot_keys, rng);
+        } else if (use_hotcold) {
+            // cold tx -> entirely from cold pool (n_hot = 0)
+            keys = pick_keys_hot_cold_tx(reads, config.num_accounts,
+                                         config.hot_accounts, 0, rng);
+        } else {
+            keys = pick_distinct_keys(reads, config.num_accounts, rng);
+        }
 
         Transaction tx;
         tx.read_keys = keys;

@@ -8,7 +8,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=128
-#SBATCH --time=00:40:00
+#SBATCH --time=01:00:00
 #SBATCH --output=bench_%j.out
 #SBATCH --error=bench_%j.err
 
@@ -29,35 +29,39 @@ HOT_RATIO=0.2
 HOT_ACCOUNTS=50
 HOT_KEYS=1
 
-# versions - each one differs only in src/mvmemory.h.
-# V0: pre-partner mutex chain. V1: lock-free chain without backoff.
-# V2: lock-free chain with backoff (current HEAD).
+# versions:
+# V0: mutex chain (8239b3f) + mutex scheduler (8239b3f)
+# V1: LF chain no-backoff (f54ebfb) + mutex scheduler (8239b3f)
+# V2: LF chain w/ backoff (HEAD) + mutex scheduler (8239b3f)
+# V3: LF chain w/ backoff (HEAD) + LF scheduler (HEAD)
 MVMEM_V0="8239b3f"
 MVMEM_V1="f54ebfb"
-# V2 uses HEAD
+SCHED_MUTEX="8239b3f"
 
 GIT_HASH=$(git rev-parse --short HEAD)
 OUT_BASE="benchmark_records/psc_${SLURM_JOB_ID}"
 
+# checks out mvmemory.h and scheduler.h at the requested refs, builds,
+# then resets both files back to HEAD so we don't drift.
 build_version() {
-    local tag=$1 ref=$2 dir=$3
-    echo "[build] ${tag} (mvmemory.h @ ${ref})"
-    git checkout "$ref" -- src/mvmemory.h
+    local tag=$1 mvmem_ref=$2 sched_ref=$3 dir=$4
+    echo "[build] ${tag} (mvmemory @ ${mvmem_ref}, scheduler @ ${sched_ref})"
+    git checkout "$mvmem_ref" -- src/mvmemory.h
+    git checkout "$sched_ref" -- src/scheduler.h
     cmake -S . -B "$dir" -DCMAKE_BUILD_TYPE=Release > /dev/null 2>&1
     cmake --build "$dir" -j > /dev/null 2>&1
-    git checkout HEAD -- src/mvmemory.h
+    git checkout HEAD -- src/mvmemory.h src/scheduler.h
 }
 
 DIR_V0="build-release-V0"
 DIR_V1="build-release-V1"
 DIR_V2="build-release-V2"
+DIR_V3="build-release-V3"
 
-build_version "V0-mutex"             "$MVMEM_V0" "$DIR_V0"
-build_version "V1-lfchain-nobackoff" "$MVMEM_V1" "$DIR_V1"
-# V2 is HEAD - no checkout needed
-echo "[build] V2-lfchain-backoff (mvmemory.h @ HEAD)"
-cmake -S . -B "$DIR_V2" -DCMAKE_BUILD_TYPE=Release > /dev/null 2>&1
-cmake --build "$DIR_V2" -j > /dev/null 2>&1
+build_version "V0-mutex"             "$MVMEM_V0" "$SCHED_MUTEX" "$DIR_V0"
+build_version "V1-lfchain-nobackoff" "$MVMEM_V1" "$SCHED_MUTEX" "$DIR_V1"
+build_version "V2-lfchain-backoff"   "HEAD"      "$SCHED_MUTEX" "$DIR_V2"
+build_version "V3-lfsched"           "HEAD"      "HEAD"         "$DIR_V3"
 
 write_header() {
     local csv=$1 ver=$2 expid=$3 expnote=$4
@@ -113,12 +117,14 @@ echo "=== exp A - contention sweep ==="
 run_exp_a V0-mutex             "./${DIR_V0}/bench/bench_scaling"
 run_exp_a V1-lfchain-nobackoff "./${DIR_V1}/bench/bench_scaling"
 run_exp_a V2-lfchain-backoff   "./${DIR_V2}/bench/bench_scaling"
+run_exp_a V3-lfsched           "./${DIR_V3}/bench/bench_scaling"
 
 echo ""
 echo "=== exp B - dex hot/cold ==="
 run_exp_b V0-mutex             "./${DIR_V0}/bench/bench_scaling"
 run_exp_b V1-lfchain-nobackoff "./${DIR_V1}/bench/bench_scaling"
 run_exp_b V2-lfchain-backoff   "./${DIR_V2}/bench/bench_scaling"
+run_exp_b V3-lfsched           "./${DIR_V3}/bench/bench_scaling"
 
 echo ""
 echo "done. outputs under ${OUT_BASE}_*"

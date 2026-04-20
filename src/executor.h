@@ -1,41 +1,10 @@
 #pragma once
 
-// executor.h - Speculative Execution + Validation + Abort (Algorithm 1 + 3)
-//
-// Contains two things:
-//
-// 1. ExecutionContext implementations (replaces VM module, Algorithm 3)
-//    - SequentialContext: defined in sequential.h (directly reads/writes a map)
-//    - ParallelContext: defined here (reads from MVMemory, writes to local buffer)
-//
-//    ParallelContext provides read(key) and write(key, value) to transaction
-//    lambdas. On read: check local write-set first, then MVMemory, then Storage.
-//    On write: buffer locally (never touch shared memory during execution).
-//    After execution, the caller (try_execute) passes the collected read-set
-//    and write-set to MVMemory.record().
-//
-// 2. Thread logic (Algorithm 1)
-//    - run(): main loop - each thread repeatedly grabs tasks from Scheduler
-//    - try_execute(version): execute a transaction incarnation
-//      -> create ParallelContext, call tx.logic(ctx), then MVMemory.record()
-//      -> if read hits ESTIMATE: call Scheduler.add_dependency()
-//    - needs_reexecution(version): validate a transaction incarnation
-//      -> call MVMemory.validate_read_set()
-//      -> if invalid: Scheduler.try_validation_abort() + convert_writes_to_estimates()
-//
-// CALL CHAIN:
-//   run() loop
-//     -> Scheduler.next_task()
-//     -> try_execute(version)
-//         -> ParallelContext created (per tx, per incarnation)
-//         -> tx.logic(ctx)           <- transaction runs here
-//         -> MVMemory.record(...)    <- write-set applied to shared memory
-//         -> Scheduler.finish_execution(...)
-//     -> needs_reexecution(version)
-//         -> MVMemory.validate_read_set(...)
-//         -> Scheduler.finish_validation(...)
-//     -> repeat until Scheduler.done()
-//
+// executor.h - Algorithm 1 (thread loop) + Algorithm 3 (VM execution).
+// ParallelContext intercepts tx.logic reads/writes: reads go through MVMemory
+// with local write-set check; writes are buffered and only flushed to shared
+// memory at the end via MVMemory.record().
+
 #include "transaction.h"
 #include "mvmemory.h"
 #include "scheduler.h"
@@ -45,7 +14,6 @@
 #include <optional>
 #include <thread>
 
-// ParallelContext (Algorithm 3: VM execution)
 // context = 「你在什麼環境下操作」 決定了同一段邏輯在不同環境下的行為
 class ParallelContext : public ExecutionContext {
     MVMemory& memory_;
@@ -115,7 +83,6 @@ public:
     std::vector<WriteDescriptor> take_write_set() { return std::move(write_set_); }
 };
 
-// Executor (Algorithm 1 + 3: Thread Logic)
 class Executor {
     Scheduler& scheduler_;
     MVMemory& memory_;
@@ -130,23 +97,23 @@ public:
         : scheduler_(scheduler), memory_(memory), block_(block), initial_state_(initial_state) {}
 
     // --- Algorithm 1: Thread Main Loop ---
-    // three independent `if`s (not if/else) so that a task returned from one
-    // handler (e.g. try_execute returning a validation task) can be serviced
-    // in the same loop iteration without re-entering scheduler.next_task.
-    // profile showed next_task is ~12% at 128 threads; this change cuts how
-    // often we go through it.
     void run() {
         std::optional<Task> task = std::nullopt;
-
+        
+        // Threads loop until check_done() conditions are met
         while (!scheduler_.done()) {
-            if (task && task->kind == TaskKind::EXECUTION_TASK) {
-                task = try_execute(task->version);
-            }
-            if (task && task->kind == TaskKind::VALIDATION_TASK) {
-                task = needs_reexecution(task->version);
-            }
+            // 1. Ask scheduler for the next task if we don't have one
             if (!task) {
                 task = scheduler_.next_task();
+            }
+            
+            // 2. Perform the task
+            if (task) {
+                if (task->kind == TaskKind::EXECUTION_TASK) {
+                    task = try_execute(task->version);
+                } else {
+                    task = needs_reexecution(task->version);
+                }
             }
         }
     }

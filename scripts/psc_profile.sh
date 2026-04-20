@@ -32,7 +32,7 @@ echo "[build] V2 with -O2 -fno-inline-functions"
 git checkout HEAD -- src/mvmemory.h
 git checkout "$SCHED_MUTEX" -- src/scheduler.h
 cmake -S . -B "$DIR_BUILD" -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_FLAGS="-O2 -fno-inline-functions -fno-omit-frame-pointer" \
+    -DCMAKE_CXX_FLAGS="-O2 -fno-inline -fno-omit-frame-pointer" \
     > /dev/null 2>&1
 cmake --build "$DIR_BUILD" -j > /dev/null 2>&1
 git checkout HEAD -- src/mvmemory.h src/scheduler.h

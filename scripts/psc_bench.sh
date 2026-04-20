@@ -132,20 +132,39 @@ run_exp_b V1-lfchain-nobackoff "./${DIR_V1}/bench/bench_scaling"
 run_exp_b V2-lfchain-backoff   "./${DIR_V2}/bench/bench_scaling"
 run_exp_b V3-lfsched           "./${DIR_V3}/bench/bench_scaling"
 
-# profile V2 on a high-contention hotspot config (128t, accounts=100)
-# so we can see where time actually goes in the best version.
+# profile V2 - build a separate profile-friendly binary with -O2 + no inlining
+# so functions stay separate in the call graph (otherwise -O3 inlines half of
+# Executor::run's work into Executor::run itself and we can't see what's hot).
 if command -v perf >/dev/null 2>&1; then
     echo ""
-    echo "=== perf profile on V2 (accounts=100, 128t) ==="
+    echo "=== perf profile on V2 (no-inline build, accounts=100, 128t) ==="
     PROF_DIR="${OUT_BASE}_profile"
+    DIR_V2_PROF="build-release-V2-prof"
     mkdir -p "$PROF_DIR"
+
+    # mvmemory.h is at HEAD (V2), scheduler.h at mutex ref. compile flags:
+    # -O2 keeps performance representative, -fno-inline-functions stops cross-
+    # function inlining so call graph is interpretable.
+    git checkout HEAD -- src/mvmemory.h
+    git checkout "$SCHED_MUTEX" -- src/scheduler.h
+    cmake -S . -B "$DIR_V2_PROF" -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_CXX_FLAGS="-O2 -fno-inline-functions -fno-omit-frame-pointer" \
+        > /dev/null 2>&1
+    cmake --build "$DIR_V2_PROF" -j > /dev/null 2>&1
+    git checkout HEAD -- src/mvmemory.h src/scheduler.h
+
     perf record -F 400 -g --call-graph dwarf -o "$PROF_DIR/perf.data" \
-        "./${DIR_V2}/bench/bench_scaling" \
+        "./${DIR_V2_PROF}/bench/bench_scaling" \
         --threads 128 --block-size $BLOCK --reads $READS --writes $WRITES \
         --compute $COMPUTE --accounts 100 --runs 3 > /dev/null 2>&1 || true
-    perf report -i "$PROF_DIR/perf.data" --stdio --no-children 2>/dev/null \
-        | head -80 > "$PROF_DIR/perf_top.txt"
-    echo "  profile -> $PROF_DIR/perf_top.txt"
+
+    # Children view shows cumulative time per function (better than self-only).
+    perf report -i "$PROF_DIR/perf.data" --stdio 2>/dev/null \
+        | head -120 > "$PROF_DIR/perf_top.txt"
+    perf report -i "$PROF_DIR/perf.data" --stdio --sort=overhead,symbol 2>/dev/null \
+        | head -40 > "$PROF_DIR/perf_flat.txt"
+    echo "  profile -> $PROF_DIR/perf_top.txt (call graph)"
+    echo "  profile -> $PROF_DIR/perf_flat.txt (flat self-time)"
 fi
 
 echo ""

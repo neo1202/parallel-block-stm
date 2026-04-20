@@ -1,8 +1,7 @@
 # Build
 build/
 build-release/
-build-release-mutex/
-build-release-lf/
+build-release-*/
 bin/
 obj/
 *.o

@@ -33,11 +33,13 @@ HOT_KEYS=1
 # V0:      mutex linked-list chain (8239b3f) + mutex scheduler
 # V0-tree: mutex std::map chain (51c8c6b on v0-tree branch) + mutex scheduler
 # V1:      LF chain no-backoff (f54ebfb) + mutex scheduler
-# V2:      LF chain w/ backoff (HEAD) + mutex scheduler
-# V3:      LF chain w/ backoff (HEAD) + LF scheduler (HEAD)
+# V2:      LF chain w/ backoff (3ab662a, pre-arena) + mutex scheduler
+# V3:      LF chain w/ backoff (3ab662a) + LF scheduler (HEAD)
+# V4:      LF chain w/ backoff + arena (HEAD) + mutex scheduler
 MVMEM_V0="8239b3f"
 MVMEM_V0TREE="51c8c6b"  # v0-tree branch
 MVMEM_V1="f54ebfb"
+MVMEM_V2="3ab662a"      # just before arena commit
 SCHED_MUTEX="8239b3f"
 
 GIT_HASH=$(git rev-parse --short HEAD)
@@ -60,12 +62,14 @@ DIR_V0T="build-release-V0tree"
 DIR_V1="build-release-V1"
 DIR_V2="build-release-V2"
 DIR_V3="build-release-V3"
+DIR_V4="build-release-V4"
 
-build_version "V0-mutex-list"   "$MVMEM_V0"     "$SCHED_MUTEX" "$DIR_V0"
-build_version "V0-mutex-tree"   "$MVMEM_V0TREE" "$SCHED_MUTEX" "$DIR_V0T"
-build_version "V1-lfchain-nobackoff" "$MVMEM_V1" "$SCHED_MUTEX" "$DIR_V1"
-build_version "V2-lfchain-backoff"   "HEAD"      "$SCHED_MUTEX" "$DIR_V2"
-build_version "V3-lfsched"           "HEAD"      "HEAD"         "$DIR_V3"
+build_version "V0-mutex-list"        "$MVMEM_V0"     "$SCHED_MUTEX" "$DIR_V0"
+build_version "V0-mutex-tree"        "$MVMEM_V0TREE" "$SCHED_MUTEX" "$DIR_V0T"
+build_version "V1-lfchain-nobackoff" "$MVMEM_V1"     "$SCHED_MUTEX" "$DIR_V1"
+build_version "V2-lfchain-backoff"   "$MVMEM_V2"     "$SCHED_MUTEX" "$DIR_V2"
+build_version "V3-lfsched"           "$MVMEM_V2"     "HEAD"         "$DIR_V3"
+build_version "V4-arena"             "HEAD"          "$SCHED_MUTEX" "$DIR_V4"
 
 write_header() {
     local csv=$1 ver=$2 expid=$3 expnote=$4
@@ -123,6 +127,7 @@ run_exp_a V0-mutex-tree        "./${DIR_V0T}/bench/bench_scaling"
 run_exp_a V1-lfchain-nobackoff "./${DIR_V1}/bench/bench_scaling"
 run_exp_a V2-lfchain-backoff   "./${DIR_V2}/bench/bench_scaling"
 run_exp_a V3-lfsched           "./${DIR_V3}/bench/bench_scaling"
+run_exp_a V4-arena             "./${DIR_V4}/bench/bench_scaling"
 
 echo ""
 echo "=== exp B - dex hot/cold ==="
@@ -131,6 +136,7 @@ run_exp_b V0-mutex-tree        "./${DIR_V0T}/bench/bench_scaling"
 run_exp_b V1-lfchain-nobackoff "./${DIR_V1}/bench/bench_scaling"
 run_exp_b V2-lfchain-backoff   "./${DIR_V2}/bench/bench_scaling"
 run_exp_b V3-lfsched           "./${DIR_V3}/bench/bench_scaling"
+run_exp_b V4-arena             "./${DIR_V4}/bench/bench_scaling"
 
 # profile V2 - build a separate profile-friendly binary with -O2 + no inlining
 # so functions stay separate in the call graph (otherwise -O3 inlines half of

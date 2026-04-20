@@ -30,11 +30,13 @@ HOT_ACCOUNTS=50
 HOT_KEYS=1
 
 # versions:
-# V0: mutex chain (8239b3f) + mutex scheduler (8239b3f)
-# V1: LF chain no-backoff (f54ebfb) + mutex scheduler (8239b3f)
-# V2: LF chain w/ backoff (HEAD) + mutex scheduler (8239b3f)
-# V3: LF chain w/ backoff (HEAD) + LF scheduler (HEAD)
+# V0:      mutex linked-list chain (8239b3f) + mutex scheduler
+# V0-tree: mutex std::map chain (51c8c6b on v0-tree branch) + mutex scheduler
+# V1:      LF chain no-backoff (f54ebfb) + mutex scheduler
+# V2:      LF chain w/ backoff (HEAD) + mutex scheduler
+# V3:      LF chain w/ backoff (HEAD) + LF scheduler (HEAD)
 MVMEM_V0="8239b3f"
+MVMEM_V0TREE="51c8c6b"  # v0-tree branch
 MVMEM_V1="f54ebfb"
 SCHED_MUTEX="8239b3f"
 
@@ -54,11 +56,13 @@ build_version() {
 }
 
 DIR_V0="build-release-V0"
+DIR_V0T="build-release-V0tree"
 DIR_V1="build-release-V1"
 DIR_V2="build-release-V2"
 DIR_V3="build-release-V3"
 
-build_version "V0-mutex"             "$MVMEM_V0" "$SCHED_MUTEX" "$DIR_V0"
+build_version "V0-mutex-list"   "$MVMEM_V0"     "$SCHED_MUTEX" "$DIR_V0"
+build_version "V0-mutex-tree"   "$MVMEM_V0TREE" "$SCHED_MUTEX" "$DIR_V0T"
 build_version "V1-lfchain-nobackoff" "$MVMEM_V1" "$SCHED_MUTEX" "$DIR_V1"
 build_version "V2-lfchain-backoff"   "HEAD"      "$SCHED_MUTEX" "$DIR_V2"
 build_version "V3-lfsched"           "HEAD"      "HEAD"         "$DIR_V3"
@@ -114,17 +118,35 @@ run_exp_b() {
 
 echo ""
 echo "=== exp A - contention sweep ==="
-run_exp_a V0-mutex             "./${DIR_V0}/bench/bench_scaling"
+run_exp_a V0-mutex-list        "./${DIR_V0}/bench/bench_scaling"
+run_exp_a V0-mutex-tree        "./${DIR_V0T}/bench/bench_scaling"
 run_exp_a V1-lfchain-nobackoff "./${DIR_V1}/bench/bench_scaling"
 run_exp_a V2-lfchain-backoff   "./${DIR_V2}/bench/bench_scaling"
 run_exp_a V3-lfsched           "./${DIR_V3}/bench/bench_scaling"
 
 echo ""
 echo "=== exp B - dex hot/cold ==="
-run_exp_b V0-mutex             "./${DIR_V0}/bench/bench_scaling"
+run_exp_b V0-mutex-list        "./${DIR_V0}/bench/bench_scaling"
+run_exp_b V0-mutex-tree        "./${DIR_V0T}/bench/bench_scaling"
 run_exp_b V1-lfchain-nobackoff "./${DIR_V1}/bench/bench_scaling"
 run_exp_b V2-lfchain-backoff   "./${DIR_V2}/bench/bench_scaling"
 run_exp_b V3-lfsched           "./${DIR_V3}/bench/bench_scaling"
+
+# profile V2 on a high-contention hotspot config (128t, accounts=100)
+# so we can see where time actually goes in the best version.
+if command -v perf >/dev/null 2>&1; then
+    echo ""
+    echo "=== perf profile on V2 (accounts=100, 128t) ==="
+    PROF_DIR="${OUT_BASE}_profile"
+    mkdir -p "$PROF_DIR"
+    perf record -F 400 -g --call-graph dwarf -o "$PROF_DIR/perf.data" \
+        "./${DIR_V2}/bench/bench_scaling" \
+        --threads 128 --block-size $BLOCK --reads $READS --writes $WRITES \
+        --compute $COMPUTE --accounts 100 --runs 3 > /dev/null 2>&1 || true
+    perf report -i "$PROF_DIR/perf.data" --stdio --no-children 2>/dev/null \
+        | head -80 > "$PROF_DIR/perf_top.txt"
+    echo "  profile -> $PROF_DIR/perf_top.txt"
+fi
 
 echo ""
 echo "done. outputs under ${OUT_BASE}_*"

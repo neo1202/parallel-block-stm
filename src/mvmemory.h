@@ -1,41 +1,9 @@
 #pragma once
 
-// mvmemory.h - Multi-Version Data Store (Algorithm 2)
-// MVMemory 是 per-block，不跨block。論文：一個 block = 一個 MVMemory + 一個 Scheduler
-//
-// The shared data structure at the heart of Block-STM. Stores multiple
-// versions of each memory location, one per transaction that wrote to it.
-//
-// WHY MULTI-VERSION?
-//   Different transactions need different "correct" values for the same
-//   location. tx2 should read what tx1 wrote; tx4 should read what tx3
-//   wrote. A single latest value cannot serve all readers simultaneously.
-//
-// STRUCTURE (Phase 2 - mutex-based):
-//   Outer: std::unordered_map<Key, VersionChain>
-//     - One entry per memory location (account ID)
-//     - Pre-populated in constructor, read-only during execution
-//
-//   Inner: VersionChain (per location)
-//     - std::map<txn_idx, MVEntry> + std::mutex (one lock per key)
-//     - MVEntry = (incarnation_number, value) | ESTIMATE marker
-//     - std::map gives O(log n) lower_bound for "find highest idx < txn_idx"
-//     - Phase 6: will be replaced with lock-free sorted linked list (Harris)
-//
-// KEY OPERATIONS (Algorithm 2, paper line numbers):
-//   read(location, txn_idx)                      - Line 47-54
-//   apply_write_set(txn_idx, incarnation, ws)     - Line 27-29
-//   rcu_update_written_locations(txn_idx, locs)   - Line 30-35
-//   record(version, read_set, write_set)          - Line 36-42
-//   convert_writes_to_estimates(txn_idx)          - Line 43-46
-//   validate_read_set(txn_idx)                    - Line 62-72
-//   snapshot()                                    - Line 55-61
-//
-// WRITE TIMING:
-//   ParallelContext buffers writes locally during tx.logic() execution.
-//   Only when execution completes WITHOUT hitting an ESTIMATE (no READ_ERROR),
-//   record() is called to write the entire write-set into shared memory at once.
-//
+// mvmemory.h - Algorithm 2 from the paper. One MVMemory per block.
+// Stores one version per (key, txn that wrote it); reads find the highest
+// written version < txn_idx. Writes are buffered in ParallelContext and
+// flushed via record() once execution finishes without hitting an ESTIMATE.
 
 #include "transaction.h"
 
@@ -50,10 +18,7 @@
 #include <unordered_set>
 #include <vector>
 
-// Types shared between MVMemory and Executor
-
-// !Version = (txn_idx, incarnation_number)
-// Uniquely identifies one execution attempt of a transaction.
+// (txn_idx, incarnation) - one execution attempt of a transaction.
 struct Version {
     size_t txn_idx;
     size_t incarnation;
@@ -95,19 +60,8 @@ struct WriteDescriptor {
     Value value;
 };
 
-// Internal types
-
-// Node in a version chain linked list.
-// Each node represents one transaction's write to this location.
-// Sorted by txn_idx descending (highest at head) for fast read():
-//   read() scans from head, first node with idx < caller's txn_idx is the answer.
-//
-// Fields:
-//   txn_idx     - which transaction wrote this entry
-//   incarnation - which incarnation of that transaction
-//   value       - the value written
-//   is_estimate - true if this entry was marked as ESTIMATE (abort marker)
-//   next        - pointer to the next node (lower txn_idx)
+// One entry in a version chain, sorted by txn_idx descending (highest at
+// head) so read(txn_idx) just scans from head until idx < txn_idx.
 struct ChainNode {
     size_t txn_idx;
     std::atomic<size_t> incarnation{0};
@@ -126,14 +80,9 @@ struct ChainNode {
 struct VersionChain {
     std::atomic<ChainNode*> head{nullptr};
 
-    ~VersionChain() {
-        ChainNode* cur = head.load(std::memory_order_relaxed);
-        while (cur) {
-            ChainNode* tmp = cur;
-            cur = cur->next.load(std::memory_order_relaxed);
-            delete tmp;
-        }
-    }
+    // no destructor work - nodes live in the per-block arena and are freed
+    // together when the arena is destroyed. cleaning up the linked list
+    // here would double-free.
 
     // Find the node for txn_idx, or nullptr if not found.
     ChainNode* find(size_t txn_idx) const {
@@ -176,10 +125,13 @@ struct VersionChain {
                 cur = cur->next.load(std::memory_order_acquire);
             }
 
-            // If found, un-delete and return existing
+            // If found, un-delete and return existing.
+            // note: we do NOT free new_node here - callers allocate from an
+            // arena, so the unused node just sits in the arena until the
+            // block ends. caller compares (result == new_node) to detect
+            // whether the node was actually inserted.
             if (cur && cur->txn_idx == txn_idx) {
                 cur->is_deleted.store(false, std::memory_order_release);
-                delete new_node;
                 return cur;
             }
 
@@ -233,6 +185,72 @@ struct VersionChain {
     }
 };
 
+// Bump allocator for ChainNode - one arena per MVMemory (per block). all
+// ChainNodes are freed in one shot when the arena is destroyed, which skips
+// the per-node delete we saw taking ~5% in the -O3 profile.
+//
+// fast path: one atomic fetch_add on the current block's offset.
+// slow path (when block is full): mutex-protected new-block allocation.
+class NodeArena {
+    struct Block {
+        std::byte* data;
+        std::atomic<size_t> offset;
+        size_t cap;
+        Block* prev;  // singly-linked for cleanup
+    };
+
+    static constexpr size_t BLOCK_CAP = 64 * 1024;  // 64 KB
+
+    std::atomic<Block*> cur_;
+    std::mutex grow_mtx_;
+
+    Block* make_block(size_t cap, Block* prev) {
+        auto* b = new Block;
+        b->data = new std::byte[cap];
+        b->offset.store(0, std::memory_order_relaxed);
+        b->cap = cap;
+        b->prev = prev;
+        return b;
+    }
+
+public:
+    NodeArena() {
+        cur_.store(make_block(BLOCK_CAP, nullptr), std::memory_order_relaxed);
+    }
+
+    ~NodeArena() {
+        Block* b = cur_.load(std::memory_order_relaxed);
+        while (b) {
+            // ChainNode has atomic members; their destructors are trivial,
+            // so we don't need to run them explicitly before freeing.
+            Block* p = b->prev;
+            delete[] b->data;
+            delete b;
+            b = p;
+        }
+    }
+
+    ChainNode* alloc(size_t txn_idx) {
+        constexpr size_t SZ = sizeof(ChainNode);
+        static_assert(alignof(ChainNode) <= 8);
+        while (true) {
+            Block* block = cur_.load(std::memory_order_acquire);
+            size_t off = block->offset.fetch_add(SZ, std::memory_order_relaxed);
+            if (off + SZ <= block->cap) {
+                return new (block->data + off) ChainNode(txn_idx);
+            }
+            // overflow - try to grow (only the first thread through the mutex
+            // actually allocates; others retry with the new block).
+            std::lock_guard<std::mutex> lk(grow_mtx_);
+            if (cur_.load(std::memory_order_acquire) == block) {
+                size_t cap = std::max(BLOCK_CAP, SZ * 2);  // in case SZ > BLOCK_CAP
+                Block* nb = make_block(cap, block);
+                cur_.store(nb, std::memory_order_release);
+            }
+        }
+    }
+};
+
 // Per-transaction auxiliary data (paper: last_written_locations, last_read_set).
 // Accessed via shared_ptr for RCU-style safe concurrent reads.
 struct TxnAuxData {
@@ -245,9 +263,15 @@ struct TxnAuxData {
         , read_set(std::make_shared<std::vector<ReadDescriptor>>()) {}
 };
 
-// MVMemory (Algorithm 2)
 class MVMemory {
     size_t block_size_;
+
+    // per-block arena for ChainNode allocations. sits before data_ so it's
+    // destroyed AFTER data_ (members destroyed in reverse order of
+    // declaration), keeping ChainNode pointers valid while chains are
+    // being torn down - but chains' destructors do nothing now since arena
+    // owns the storage.
+    NodeArena arena_;
 
     // location -> VersionChain.
     // Pre-populated in constructor for all keys in initial_state.
@@ -413,10 +437,10 @@ private:
             assert(it != data_.end() && "write to unknown location");
             auto& chain = it->second;
 
-            // Pre-build node with correct fields BEFORE inserting into list.
-            // Prevents a race where another thread reads value=0 between
-            // CAS success and the subsequent stores.
-            auto* candidate = new ChainNode(txn_idx);
+            // Pre-build node with correct fields before inserting, so
+            // readers never see a half-initialized entry (value=0). node
+            // comes from the per-block arena, no individual delete needed.
+            auto* candidate = arena_.alloc(txn_idx);
             candidate->incarnation.store(incarnation, std::memory_order_relaxed);
             candidate->value.store(wd.value, std::memory_order_relaxed);
             candidate->is_estimate.store(false, std::memory_order_relaxed);
@@ -424,7 +448,8 @@ private:
 
             ChainNode* node = chain.upsert(candidate);
             if (node != candidate) {
-                // Existing node - update its fields (only one writer per txn_idx).
+                // existing node - update its fields. candidate is wasted but
+                // sits in the arena until block cleanup.
                 node->incarnation.store(incarnation, std::memory_order_relaxed);
                 node->value.store(wd.value, std::memory_order_relaxed);
                 node->is_estimate.store(false, std::memory_order_relaxed);

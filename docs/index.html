@@ -384,7 +384,7 @@
     <!-- ──── OVERVIEW ──── -->
     <div class="tab-panel active" id="overview">
       <div class="prose">
-        <p>We implement the <strong>Block-STM</strong> algorithm (Gelashvili et al., PPoPP 2023) — the parallel execution engine behind the Aptos blockchain — in C++. Given a block of N ordered transactions, our engine speculatively executes them in parallel across multiple threads, dynamically detects read/write conflicts at runtime, aborts and re-executes conflicting transactions via cascading rollback, and guarantees the final state is identical to sequential execution in the preset order. The core data structure is a lock-free multi-version memory store where each key maintains a version chain accessed concurrently by all threads using <code>std::atomic</code> operations. We evaluate scaling behavior across thread counts and contention levels, and analyze abort rates, cache behavior, and the overhead of optimistic concurrency control.</p>
+        <p>We implement the <strong>Block-STM</strong> algorithm (Gelashvili et al., PPoPP 2023) - the parallel execution engine behind the Aptos blockchain - in C++. Given a block of N ordered transactions, our engine speculatively executes them in parallel across multiple threads, dynamically detects read/write conflicts at runtime, aborts and re-executes conflicting transactions via cascading rollback, and guarantees the final state is identical to sequential execution in the preset order. The core data structure is a lock-free multi-version memory store where each key maintains a version chain accessed concurrently by all threads using <code>std::atomic</code> operations. We evaluate scaling behavior across thread counts and contention levels, and analyze abort rates, cache behavior, and the overhead of optimistic concurrency control.</p>
       </div>
 
       <div class="overview-grid">
@@ -492,28 +492,28 @@
       <div class="prose">
 
         <h2>Summary</h2>
-        <p>We implement the <strong>Block-STM</strong> algorithm — a parallel execution engine for ordered transactions built on Software Transactional Memory principles — in C++ with OpenMP. Given a block of N transactions with a preset sequential order, our engine speculatively executes them in parallel, detects read/write conflicts at runtime through a validation phase, and aborts and re-executes conflicting transactions while guaranteeing the final result is identical to sequential execution. The core challenge is building a <strong>lock-free multi-version data store</strong> and a <strong>collaborative scheduler</strong> that coordinates speculative execution, validation, and cascading aborts using <code>std::atomic</code> operations. Our primary goal is to characterize speedup, abort rates, and cache behavior across varying thread counts and contention levels.</p>
+        <p>We implement the <strong>Block-STM</strong> algorithm - a parallel execution engine for ordered transactions built on Software Transactional Memory principles - in C++ with OpenMP. Given a block of N transactions with a preset sequential order, our engine speculatively executes them in parallel, detects read/write conflicts at runtime through a validation phase, and aborts and re-executes conflicting transactions while guaranteeing the final result is identical to sequential execution. The core challenge is building a <strong>lock-free multi-version data store</strong> and a <strong>collaborative scheduler</strong> that coordinates speculative execution, validation, and cascading aborts using <code>std::atomic</code> operations. Our primary goal is to characterize speedup, abort rates, and cache behavior across varying thread counts and contention levels.</p>
 
         <h2>Background</h2>
 
         <h3>The Problem: Parallel Execution with Preset Order</h3>
-        <p>In systems like blockchains, a block contains N ordered transactions (T₁, T₂, ..., Tₙ) that must be executed such that the final state matches strictly sequential execution in that order. The naive approach — execute them one by one — is safe but slow. The challenge is: <em>how do we execute transactions in parallel without knowing their dependencies upfront, while guaranteeing the result is identical to sequential execution?</em></p>
+        <p>In systems like blockchains, a block contains N ordered transactions (T₁, T₂, ..., Tₙ) that must be executed such that the final state matches strictly sequential execution in that order. The naive approach - execute them one by one - is safe but slow. The challenge is: <em>how do we execute transactions in parallel without knowing their dependencies upfront, while guaranteeing the result is identical to sequential execution?</em></p>
 
-        <p>This is a well-studied problem in the database and transactional memory literature. Block-STM (Gelashvili et al., PPoPP 2023) solves it using <strong>optimistic concurrency control</strong>: execute first, validate later, abort and retry on conflict. The key insight is that the preset order — often seen as a constraint — is actually a performance blessing, because it eliminates the need for complex serialization ordering that general-purpose STM libraries must handle.</p>
+        <p>This is a well-studied problem in the database and transactional memory literature. Block-STM (Gelashvili et al., PPoPP 2023) solves it using <strong>optimistic concurrency control</strong>: execute first, validate later, abort and retry on conflict. The key insight is that the preset order - often seen as a constraint - is actually a performance blessing, because it eliminates the need for complex serialization ordering that general-purpose STM libraries must handle.</p>
 
         <h3>Algorithm Overview</h3>
         <p>Block-STM operates in a continuous loop across all worker threads. Each thread repeatedly picks the next available task (either an execution or a validation) from a shared scheduler:</p>
 
-        <p><strong>Phase 1 — Speculative Execution:</strong> A thread picks transaction Tₖ and executes it against the multi-version data store (MVMemory). For each read, the thread finds the most recent version written by a transaction with ID &lt; k. The read location and version are recorded in Tₖ's read-set. Write results go into Tₖ's write-set and are published to MVMemory tagged with version k.</p>
+        <p><strong>Phase 1 - Speculative Execution:</strong> A thread picks transaction Tₖ and executes it against the multi-version data store (MVMemory). For each read, the thread finds the most recent version written by a transaction with ID &lt; k. The read location and version are recorded in Tₖ's read-set. Write results go into Tₖ's write-set and are published to MVMemory tagged with version k.</p>
 
-        <p><strong>Phase 2 — Validation:</strong> After execution, Tₖ enters validation. The system re-checks every entry in Tₖ's read-set: has any other transaction written a newer version to that location since Tₖ read it? If yes, Tₖ read stale data — it must be aborted.</p>
+        <p><strong>Phase 2 - Validation:</strong> After execution, Tₖ enters validation. The system re-checks every entry in Tₖ's read-set: has any other transaction written a newer version to that location since Tₖ read it? If yes, Tₖ read stale data - it must be aborted.</p>
 
-        <p><strong>Phase 3 — Abort &amp; Re-execution:</strong> When Tₖ is aborted, its writes in MVMemory are replaced with <code>ESTIMATE</code> markers (not deleted). Any later transaction Tⱼ (j &gt; k) that attempts to read a location and encounters an <code>ESTIMATE</code> marker knows it has a dependency on a transaction currently being re-executed — it suspends rather than reading stale data and getting aborted later. This dramatically reduces cascading aborts. Aborted transactions are re-queued with priority given to lower-ID transactions to guarantee progress and prevent livelocks.</p>
+        <p><strong>Phase 3 - Abort &amp; Re-execution:</strong> When Tₖ is aborted, its writes in MVMemory are replaced with <code>ESTIMATE</code> markers (not deleted). Any later transaction Tⱼ (j &gt; k) that attempts to read a location and encounters an <code>ESTIMATE</code> marker knows it has a dependency on a transaction currently being re-executed - it suspends rather than reading stale data and getting aborted later. This dramatically reduces cascading aborts. Aborted transactions are re-queued with priority given to lower-ID transactions to guarantee progress and prevent livelocks.</p>
 
         <p><strong>Commit:</strong> The entire block commits atomically once all transactions have been validated and no ongoing execution or validation tasks remain.</p>
 
         <h3>Multi-Version Data Store (MVMemory)</h3>
-        <p>MVMemory is a concurrent hash map where each key maps to a <strong>version chain</strong> — a sorted list of <code>(tx_id, value)</code> entries. The core operations are:</p>
+        <p>MVMemory is a concurrent hash map where each key maps to a <strong>version chain</strong> - a sorted list of <code>(tx_id, value)</code> entries. The core operations are:</p>
         <ul>
           <li><code>write(location, tx_id, value)</code>: Insert or update the entry for <code>tx_id</code> in the version chain.</li>
           <li><code>read(location, tx_id)</code>: Find the entry with the largest <code>tx_id &lt; k</code>. If the entry is an <code>ESTIMATE</code> marker, return <code>READ_ERROR</code> (dependency detected). If no entry exists, fall back to the pre-block storage snapshot.</li>
@@ -521,7 +521,7 @@
         <p>Both operations must be safe under concurrent access from all threads without coarse-grained locking.</p>
 
         <h3>Why is this suitable for parallelism?</h3>
-        <p>Under low-contention workloads (transactions touching mostly disjoint memory locations), almost all speculative executions succeed validation on the first try, yielding near-linear speedup. Under high contention, the ESTIMATE marker mechanism and priority-based scheduling keep abort rates manageable. The algorithm dynamically discovers and exploits whatever parallelism exists in the workload — no static dependency analysis is required.</p>
+        <p>Under low-contention workloads (transactions touching mostly disjoint memory locations), almost all speculative executions succeed validation on the first try, yielding near-linear speedup. Under high contention, the ESTIMATE marker mechanism and priority-based scheduling keep abort rates manageable. The algorithm dynamically discovers and exploits whatever parallelism exists in the workload - no static dependency analysis is required.</p>
 
         <h2>The Challenge</h2>
 
@@ -529,21 +529,21 @@
 
         <p><strong>Lock-free multi-version data store:</strong> MVMemory is the central shared data structure accessed by every thread on every read and write. Using mutexes would serialize access and destroy scalability. We implement version chain operations using <code>std::atomic</code> compare-and-swap (CAS) loops, which requires careful reasoning about ABA problems, memory ordering (<code>memory_order_acquire</code>/<code>release</code>/<code>seq_cst</code>), and correctness under relaxed consistency.</p>
 
-        <p><strong>Cascading aborts:</strong> When transaction Tₖ is aborted and re-executed, its new writes may differ from the old ones. Every transaction Tⱼ (j &gt; k) that read Tₖ's old output must also be aborted. In the worst case, a single abort at T₁ can cascade through the entire block. The ESTIMATE marker mechanism mitigates this by converting "abort after wasted execution" into "suspend before wasted execution," but implementing this correctly — especially the transition from ESTIMATE back to a real value after re-execution, and waking up suspended threads — involves subtle synchronization.</p>
+        <p><strong>Cascading aborts:</strong> When transaction Tₖ is aborted and re-executed, its new writes may differ from the old ones. Every transaction Tⱼ (j &gt; k) that read Tₖ's old output must also be aborted. In the worst case, a single abort at T₁ can cascade through the entire block. The ESTIMATE marker mechanism mitigates this by converting "abort after wasted execution" into "suspend before wasted execution," but implementing this correctly - especially the transition from ESTIMATE back to a real value after re-execution, and waking up suspended threads - involves subtle synchronization.</p>
 
         <p><strong>Livelock prevention:</strong> Without careful scheduling, two transactions can repeatedly abort each other: T₅ aborts T₈ which re-executes and aborts T₅ in a cycle. Block-STM prevents this by always prioritizing lower-ID transactions for re-execution and ensuring that a re-executing transaction can only be aborted by a transaction with a strictly lower ID. Implementing this priority scheme correctly in the scheduler using only atomic operations is non-trivial.</p>
 
         <p><strong>Cache behavior:</strong> The multi-version data store is a pointer-heavy structure (hash map → version chains → entries) with poor spatial locality. Under high concurrency, false sharing on adjacent version chain entries and on the scheduler's atomic counters can degrade performance. We plan to analyze this with <code>perf</code> and explore cache-line padding and memory layout optimizations.</p>
 
         <h2>Resources</h2>
-        <p><strong>Hardware:</strong> GHC machines — Intel i7-9700 (8 cores), NVIDIA RTX 2080 GPU (for stretch goal), 16 GB RAM.</p>
+        <p><strong>Hardware:</strong> GHC machines - Intel i7-9700 (8 cores), NVIDIA RTX 2080 GPU (for stretch goal), 16 GB RAM.</p>
         <p><strong>Software:</strong> C++20, OpenMP, CUDA toolkit (stretch goal), <code>perf</code> for cache profiling.</p>
-        <p><strong>Code base:</strong> Starting from scratch — no existing codebase.</p>
+        <p><strong>Code base:</strong> Starting from scratch - no existing codebase.</p>
 
         <h3>References</h3>
-        <p>[1] Gelashvili, Spiegelman, Xiang, et al. "Block-STM: Scaling Blockchain Execution by Turning Ordering Curse to a Performance Blessing." PPoPP, 2023. (Core implementation reference — Section 3 contains pseudocode for the scheduler, MVMemory, and validation logic.)<br>
-        [2] Shavit, Touitou. "Software Transactional Memory." PODC, 1995. (Foundational STM paper — Block-STM adapts OCC principles from this work to the deterministic, preset-order setting.)<br>
-        [3] Cooper et al. "Benchmarking Cloud Serving Systems with YCSB." SoCC, 2010. (Workload generation methodology.)</p>
+        <p>[1] Gelashvili, Spiegelman, Xiang, et al. "Block-STM: Scaling Blockchain Execution by Turning Ordering Curse to a Performance Blessing." PPoPP, 2023. (Core implementation reference - Section 3 contains pseudocode for the scheduler, MVMemory, and validation logic.)<br>
+        [2] Shavit, Touitou. "Software Transactional Memory." PODC, 1995. (Foundational STM paper - Block-STM adapts OCC principles from this work to the deterministic, preset-order setting.)<br>
+        [3] Kung, H. T., Robinson, J. T. "On Optimistic Methods for Concurrency Control." ACM TODS, 1981. (Introduces the OCC paradigm that Block-STM specializes to ordered blocks.)</p>
 
         <h2>Goals and Deliverables</h2>
         <h3>Plan to Achieve (MVP)</h3>
@@ -566,7 +566,7 @@
 
         <h3>Hope to Achieve (Stretch Goals)</h3>
         <ol start="8">
-          <li><strong>CUDA port:</strong> Map speculative execution to GPU — one thread per transaction. Analyze why GPU is suboptimal for this workload: warp divergence from abort/retry branching, global memory contention on MVMemory, lack of efficient cross-warp synchronization for the collaborative scheduler. Quantify GPU vs CPU throughput across contention levels.</li>
+          <li><strong>CUDA port:</strong> Map speculative execution to GPU - one thread per transaction. Analyze why GPU is suboptimal for this workload: warp divergence from abort/retry branching, global memory contention on MVMemory, lack of efficient cross-warp synchronization for the collaborative scheduler. Quantify GPU vs CPU throughput across contention levels.</li>
           <li><strong>Cache-line padding optimization:</strong> Pad version chain entries and atomic counters to eliminate false sharing; measure the impact on throughput.</li>
           <li><strong>Dependency-aware scheduling:</strong> After first execution round, use observed read/write sets to build a dependency graph and pre-schedule independent transactions, reducing abort rates on subsequent blocks with similar access patterns.</li>
         </ol>
@@ -593,10 +593,10 @@
         <table>
           <thead><tr><th>Test</th><th>Description</th></tr></thead>
           <tbody>
-            <tr><td>Zero-contention</td><td>10K transactions on 10K disjoint accounts — parallel result must match sequential</td></tr>
-            <tr><td>Full-contention</td><td>10K transactions on 2 accounts — effectively sequential, tests abort/retry correctness</td></tr>
+            <tr><td>Zero-contention</td><td>10K transactions on 10K disjoint accounts - parallel result must match sequential</td></tr>
+            <tr><td>Full-contention</td><td>10K transactions on 2 accounts - effectively sequential, tests abort/retry correctness</td></tr>
             <tr><td>Mixed workload</td><td>Realistic read/write patterns with varying hot-spot ratios</td></tr>
-            <tr><td>Determinism</td><td>Run same block 100 times — output must be bit-identical every time</td></tr>
+            <tr><td>Determinism</td><td>Run same block 100 times - output must be bit-identical every time</td></tr>
           </tbody>
         </table>
 
@@ -652,7 +652,7 @@
         <h3>Nice to Have</h3>
         <ul>
           <li><strong>Lock-free skip list for version chains:</strong> Replace sorted linked list (O(n) lookup) with a lock-free skip list (O(log n) expected). This matters most under extreme contention where version chains grow long (e.g., 2 accounts with 10,000 transactions). Implementation complexity is between linked list and balanced tree.</li>
-          <li><strong>Dependency-check optimization:</strong> Before executing a transaction, scan the previous incarnation's read-set for ESTIMATE markers. If any are found, skip the full execution and abort immediately — avoids a completely wasted execution cycle.</li>
+          <li><strong>Dependency-check optimization:</strong> Before executing a transaction, scan the previous incarnation's read-set for ESTIMATE markers. If any are found, skip the full execution and abort immediately - avoids a completely wasted execution cycle.</li>
           <li><strong>Thread pool:</strong> Currently threads are spawned and joined per block. A persistent thread pool across blocks would eliminate per-block thread creation overhead.</li>
           <li><strong>Lock-free scheduler status:</strong> Pack <code>(incarnation, status)</code> into a single <code>atomic&lt;uint64_t&gt;</code> and use CAS instead of mutex for status transitions.</li>
           <li><strong>Arena allocator for chain nodes:</strong> Since MVMemory is per-block, allocate all chain nodes from a memory pool and free the entire pool at block completion. Avoids per-node <code>new</code>/<code>delete</code> and sidesteps lock-free memory reclamation issues.</li>
@@ -673,7 +673,7 @@
 
         <p><strong>Analysis:</strong> The parallel version is currently ~40x slower than sequential. This is expected for the mutex-based implementation. Each transaction performs only ~10 arithmetic instructions (a simple balance transfer), but the parallel version acquires and releases a mutex lock on every MVMemory read and write (4 lock/unlock pairs per transaction). The synchronization cost dominates the actual computation by orders of magnitude.</p>
 
-        <p>Increasing thread count from 4 to 8 makes performance <em>worse</em> (378ms &rarr; 537ms), confirming that mutex contention — not compute capacity — is the bottleneck. This motivates our next phase: replacing mutex-protected version chains with lock-free CAS-based operations, which should dramatically reduce per-operation overhead and allow parallelism to outweigh synchronization cost.</p>
+        <p>Increasing thread count from 4 to 8 makes performance <em>worse</em> (378ms &rarr; 537ms), confirming that mutex contention - not compute capacity - is the bottleneck. This motivates our next phase: replacing mutex-protected version chains with lock-free CAS-based operations, which should dramatically reduce per-operation overhead and allow parallelism to outweigh synchronization cost.</p>
 
         <h2>Updated Schedule</h2>
         <h3>Completed</h3>

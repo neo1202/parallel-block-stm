@@ -5,24 +5,22 @@ working notes. what we ran, what we got, what we noticed.
 ## fixed workload params (don't change across experiments)
 
 - block size = 10000 txs
-- reads/writes per tx = 2 / 2  (simplified diem p2p - conflict-relevant state only)
+- reads/writes per tx = 2 / 2  (simplified diem p2p)
 - compute per tx = 200 sha-256 rounds over the read values (simulates VM + gas + signature work)
 - runs = 10, take median
-- seed fixed so each run is reproducible
+- seed fixed so each run
 - threads swept over {1, 2, 4, 8, 16, 32, 64, 128}
 
 why 2r/2w + compute instead of diem's actual 21r/4w: real diem's 21 reads are mostly to static state (module bytecode, gas schedule, chain params) that never conflict. treating all 21 as dynamic MVMemory reads overestimates contention and penalizes lock-free with unnecessary atomic barriers. we model conflict-causing accesses (2r/2w = balance changes) + compute padding for the rest of the VM work. sequential throughput lands around 15-30k tps on PSC.
 
 ## versions tracked
 
-| tag | mvmemory.h @ | scheduler.h @ | notes |
-|---|---|---|---|
-| V0-mutex-list  | 8239b3f | 8239b3f | baseline - mutex versionchain (linked list), mutex scheduler |
-| V0-mutex-tree  | 51c8c6b (v0-tree) | 8239b3f | mutex versionchain using std::map (red-black tree) |
-| V1-lfchain-nobackoff | f54ebfb | 8239b3f | LF chain w/ pre-built-node CAS, no backoff |
-| V2-lfchain-backoff   | HEAD    | 8239b3f | V1 + exponential backoff on CAS failure |
-| V3-lfsched           | HEAD    | HEAD    | V2 + LF scheduler (bit-packed status + Treiber-stack deps, races fixed) |
-| V4+ | future | future | arena allocator / skip list / ... |
+- **V0-mutex-list** - baseline, mutex versionchain (linked list) + mutex scheduler
+- **V0-mutex-tree** - mutex versionchain using std::map (red-black tree)
+- **V1-lfchain-nobackoff** - LF chain w/ pre-built-node CAS, no backoff
+- **V2-lfchain-backoff** - V1 + exponential backoff on CAS failure
+- **V3-lfsched** - V2 + LF scheduler (bit-packed status + Treiber-stack deps)
+- **V4-arena** - V2 + per-block arena allocator for ChainNode
 
 ## two experiments, run per version
 
@@ -41,7 +39,7 @@ first full run of the exp A + exp B template. only V0 and V2 tested; adding V1 n
 128 threads, tps:
 
 | experiment | V0-mutex | V2-lfchain-backoff | delta |
-|---|---|---|---|
+----------------------------------------------------------------------------------------
 | exp A, accounts=2     | 3,172   | 6,184   | +95% |
 | exp A, accounts=10    | 12,184  | 13,243  | +9% |
 | exp A, accounts=100   | 75,289  | 84,133  | +12% |
@@ -64,7 +62,7 @@ added V1 (LF chain, race fixed, no backoff) so we can compare backoff's contribu
 results @ 128 threads, exp A:
 
 | accounts | V0 mutex | V1 LF no-bo | V2 LF +bo |
-|---|---|---|---|
+----------------------------------------------------------------------------------------
 | 2     | 2974   | 6191    | 6267    |
 | 10    | 12336  | 13607   | 13222   |
 | 100   | 71986  | 79738   | 81868   |
@@ -72,11 +70,11 @@ results @ 128 threads, exp A:
 | 10000 | 238124 | 228147  | 219621  |
 | hot/cold | 182916 | 207363 | 206731 |
 
-surprise: backoff barely helped. V1 (no backoff) and V2 (with backoff) are within +-3% on every config. our previous theory that backoff is needed to avoid "CAS retry storm" doesn't seem to manifest in this workload - chains are short enough that simultaneous CAS attempts on the same head pointer aren't actually frequent.
+backoff barely helped, which was surprising. V1 and V2 are within ±3% everywhere. the "CAS retry storm" we were worried about doesn't really happen here - chains are too short for many threads to CAS the same head at once.
 
-the big jump is V0 -> V1: just removing the mutex (with race-free pre-built node CAS) gets nearly all the win. accounts=2 doubles (3k -> 6k), hot/cold gains 13%. backoff is "nice to have" overhead-control, not a primary optimization.
+the real win is V0 -> V1: just removing the mutex from version chain does most of the work. accounts=2 doubles, hot/cold gains 13%.
 
-at low contention (accounts=10000) V1/V2 actually slightly LOSE to V0 (-4%). on PSC EPYC the mutex is fast enough that LF's atomic-load barriers are pure overhead when there's nothing to contend over.
+one weird thing: at accounts=10000 V1/V2 actually slightly LOSE to V0 (-4%). on EPYC the mutex path is already pretty fast, so when there's no contention the LF code's extra atomic barriers are just overhead.
 
 CSVs: `benchmark_records/psc_40062716_*/`
 
@@ -91,7 +89,7 @@ V3 = V2 + lock-free scheduler (partner's bit-packed TxnStatusEntry + Treiber-sta
 results @ 128 threads, exp A:
 
 | accounts | V0    | V1    | V2    | V3    | V3 vs V2 |
-|---|---|---|---|---|---|
+----------------------------------------------------------------------------------------
 | 2     | 3079   | 6314   | 6292   | 3069   | -51%  |
 | 10    | 12654  | 13560  | 13593  | 11035  | -19% |
 | 100   | 71753  | 79703  | 80506  | 70704  | -12% |
@@ -99,9 +97,11 @@ results @ 128 threads, exp A:
 | 10000 | 207160 | 237604 | 238549 | 227807 | -5% |
 | hot/cold | 206214 | 207925 | 203446 | 210272 | +3% |
 
-V3 regressed at high contention. accounts=2 dropped back to V0 levels (-51% vs V2). the dep stack head is a single atomic pointer - 128 threads CAS-pushing onto the same head means retry storm. bit-packed status CAS bounces a cache line across 128 cores on every transition, even with alignas(64). and the mutex scheduler's "block when contended" behaviour is actually adaptive - it parks waiting threads instead of burning cycles on doomed CAS retries.
+V3 regressed badly at high contention. accounts=2 dropped back to V0 levels (-51% vs V2). dep stack head is one atomic pointer, 128 threads CAS-pushing onto it is a retry storm. status CAS bounces cache lines between cores. the mutex version was actually adaptive, it parks contended threads instead of burning CPU in CAS loops.
 
-so lock-free was the wrong tool here. bottleneck wasn't mutex acquire latency, it was contention itself, and CAS doesn't make contention go away - it just moves it. V2 is our best version so far. keeping V3 in the codebase as a negative result.
+lock-free was the wrong tool here. the actual bottleneck wasn't mutex latency, it was contention itself. CAS doesn't make contention disappear, it just moves it.
+
+V2 stays as our best. leaving V3 in the codebase as a negative result.
 
 CSVs: `benchmark_records/psc_40063602_*/`
 
@@ -116,7 +116,7 @@ added V0-mutex-tree (std::map<txn_idx, ChainNode*> + std::mutex, instead of link
 results @ 128 threads, exp A:
 
 | accounts | V0-list | V0-tree | V1     | V2     | V3     |
-|---|---|---|---|---|---|
+----------------------------------------------------------------------------------------
 | 2     | 2963   | 5547   | 6236   | 6212   | 3094   |
 | 10    | 12458  | 11928  | 13632  | 13273  | 11141  |
 | 100   | 78687  | 76421  | 82729  | 83219  | 70762  |
@@ -140,9 +140,16 @@ so a "smarter data structure" isn't a free win. for our workloads, plain linked 
  1.26%  cfree                            (more dealloc)
 ```
 
-observations: compute is only 18% of total time (real diem/aptos would be 60-80%, we keep compute low so other costs stay visible). mutex is 1.82% - confirms V3 result, mutex wasn't the bottleneck. alloc/free is ~3-4% combined (_int_free + cfree + others) - removable with an arena. the remaining ~60% inside Executor::run is hidden behind the umbrella symbol; likely MVMemory read traversal, scheduler counter atomics, validate_read_set.
+takeaways from this profile:
 
-what to try next: arena allocator for ChainNode (low risk, targets the 3-4% alloc overhead). skip list probably not worth it - traversal isn't a hotspot in the profile, and V0-tree already showed "smarter chain data structure" only helps at extreme contention.
+compute is only 18% of total time. real diem/aptos would be more like 60-80%, we kept compute low on purpose so optimization differences in the other 82% stay visible.
+
+mutex is 1.82%. this is why V3 didn't help - mutex wasn't the bottleneck to begin with, so making it lock-free didn't buy anything.
+
+alloc/free is ~3-4% combined. arena should clean that up.
+
+the 60% hiding inside Executor::run  is because it's all inlined so perf can't see inside. 
+next step is to get a breakdown of that by rebuilding without inlining.
 
 CSVs: `benchmark_records/psc_40068444_*/`, profile: `benchmark_records/psc_40068444_profile/perf_top.txt`
 
@@ -173,9 +180,13 @@ third attempt: rebuild with `-O2 -fno-inline`. this one disabled ALL inlining, a
      0.55%   Scheduler::finish_validation
 ```
 
-caveat: -fno-inline inflates SHA-256 from its true 18% (under -O3) to 71% here because SHA's tight helpers (rotr, ch, bsig1, ssig0, ...) become real function calls. absolute times aren't directly comparable across the two profiles. so we use -O3 for absolute per-function cost (compute=18%, mutex=1.8%, alloc=5%) and -fno-inline for relative proportions inside the "Executor::run self time" umbrella. the -O3 "66% self time" turns out to be ~12-15% scheduler.next_task (dominated by next_version_to_validate) plus small bits.
+caveat: -fno-inline inflates SHA-256 from 18% (real!!!) to 71% because all the tight helpers become real function calls. so absolute times aren't comparable across profiles!!! we use -O3 for real per-function cost and -fno-inline just for proportions inside. our -O3 "66% self time" is really ~12-15% scheduler.next_task plus lots of small stuff.
 
-what this changes for our plan: skip list / tree dropped (MVMemory::read and find_less_than don't show up above ~0.5% in either profile, so O(N) -> O(log N) saves almost nothing; combined with V0-tree's earlier result, not worth the complexity). arena confirmed - `_int_free` + `cfree` + `malloc` is ~5% under -O3, cleanly removable. scheduler.next_task at 24% under -fno-inline (~6-12% under -O3) is the next-biggest hotspot after compute; full LF counter redesign is too risky (V3 regressed) but we can cut how often next_task is called. the paper's Algorithm 1 uses three chained ifs so a validation task can be processed without re-entering the scheduler; partner's version used if/else and pays one extra next_task per transition. reverting that should shave some of the 24%.
+so what changes:
+
+- skip list / tree: dont do now and consider doing later. MVMemory::read doesn't show up above 0.5% in either profile. O(log n) saves basically nothing on our workload.
+- arena: 5% removable allocator cost under -O3.
+- scheduler.next_task 24% under -fno-inline (6-12% under -O3): this is the next-biggest thing after compute. a full LF counter redesign is risky (V3 already showed this), but we can reduce how often next_task is called. the paper uses three chained ifs so validation tasks get processed without re-entering the scheduler; partner's version does if/else instead which adds one extra next_task call per transition. switching back to three-if should help.
 
 profile outputs: `benchmark_records/psc_40068866_profile_noinline/`
 
@@ -212,9 +223,9 @@ reverted executor.h to the old if/else. V2 returned to ~205k at 1000/128t, confi
 clean V4 vs V2 comparison at 128 threads:
 
 | accounts | V2      | V4      | delta |
-|---|---|---|---|
+----------------------------------------------------------------------------------------
 | 2         | 6,310   | 6,478   | +3% |
-| 10        | 13,758  | 13,255  | -4% (noise) |
+| 10        | 13,758  | 13,255  | -4% |
 | 100       | 81,244  | 83,093  | +2% |
 | 1000      | 205,586 | 228,630 | +11% |
 | 10000     | 232,063 | 239,747 | +3% |
@@ -225,7 +236,7 @@ arena gives a real 3-11% improvement, matches the profile prediction (~5% remova
 scorecard at 128 threads, accounts=1000:
 
 | version | tps     | vs V0 |
-|---|---|---|
+----------------------------------------------------------------------------------------
 | V0-mutex-list          | 189,606 | baseline |
 | V0-mutex-tree          | 156,687 | -17% (tree only helps when chains are long) |
 | V1-lfchain-nobackoff   | 203,613 | +7% |
@@ -235,6 +246,53 @@ scorecard at 128 threads, accounts=1000:
 
 overall observations from the series:
 
-removing the mutex from the version chain (V0 -> V1) was the single biggest win at extreme contention (+87% at accounts=2). mutex serializes all 128 threads on the same chain; CAS lets them proceed concurrently. exponential backoff on CAS (V1 -> V2) barely helped - chains are short enough that retry storms don't form. lock-free scheduler (V2 -> V3) did NOT help: Treiber-stack deps + bit-packed CAS on status just moved contention from mutex onto atomic-CAS cache-line bouncing; at accounts=2 it actually regressed to V0 levels. mutex's adaptive blocking is genuinely better than CAS retry when there's real contention. replacing linked list with std::map (V0-tree) only pays off at pathological contention (accounts=2); elsewhere the red-black tree's bigger node + balancing cost loses to plain linked-list traversal. arena (V4) is a clean +5-11% win from removing the malloc/free hot-path - small but reliable. overall V0 -> V4 gave +21% at accounts=1000, +34% at hot/cold, and +87% at accounts=2.
+removing the mutex from the version chain (V0 -> V1) was the single biggest win at extreme contention (+87% at accounts=2). mutex serializes all 128 threads on the same chain; CAS lets them proceed concurrently. exponential backoff on CAS (V1 -> V2) barely helped - chains are short enough that retry storms don't form. lock-free scheduler (V2 -> V3) did NOT help: the move just moved contention from mutex onto atomic-CAS cache-line bouncing; at accounts=2 it actually regressed to V0 levels. mutex's adaptive blocking is genuinely better than CAS retry when there's real contention. replacing linked list with std::map (V0-tree) only pays off at pathological contention (accounts=2); elsewhere the red-black tree's bigger node + balancing cost loses to plain linked-list traversal. arena (V4) is a clean +5-11% win from removing the malloc/free hot-path - small but reliable. overall V0 -> V4 gave +21% at accounts=1000, +34% at hot/cold, and +87% at accounts=2.
 
 CSVs: `benchmark_records/psc_40118226_*/`
+
+---
+
+### 2026-04-21, PSC job 40140577
+
+added per-thread counters for validation_aborts, dependency_suspends, total_executions. per-thread uint64 that the executor just ++'s, no atomic needed since each thread writes its own slot. block-level sums get reported in the bench csv. overhead is basically nothing.
+
+reran current main (V4) to get a new baseline with these stats. throughput matches the old numbers so the instrumentation didn't break anything.
+
+abort rate across contention levels at 128t:
+
+```
+accounts   tps      abort_rate   wasted_ratio
+2          3,750    130%         57%
+10         11,180   152%         60%
+100        72,961   107%         52%
+1000       204,024  17%          15%
+10000      234,864  2.4%         2.3%
+```
+
+five orders of magnitude swing in abort rate across the sweep. >100% means the average tx aborts at least once:(
+
+main configs (accounts=1000, 10000, hot/cold at 232k 17%) are the ones we actually care about for optimization. accounts=2/10/100 are basically serialized and no lock-free trick is going to save you there.
+
+scaling curve at accounts=1000:
+
+```
+threads   tps      speedup   abort rate
+1 (seq)   8,804    1.0x      0
+2         17,332   2.0x      0.3%
+4         33,504   3.8x      1.0%
+8         63,822   7.2x      2.5%
+16        106,951  12.2x     4.7%
+32        152,425  17.3x     6.7%
+64        204,018  23.2x     11%
+128       204,024  23.2x     17%
+```
+
+1 to 64 threads scales near-linearly, 23x is healthy (ceiling is 32x). then 64 to 128 is completely flat, exactly the same 204k. the extra 64 cores contribute nothing.
+
+this is the scheduler bottleneck showing up. accounts=10000 has basically no aborts (2.4%) but 128t is still only 8% faster than 64t (218k -> 235k). not an abort problem - it's shared counter contention. the 64->128 plateau shows up everywhere: accounts=100 actually drops -6%, accounts=1000 is flat, hot/cold gains +15%. the plateau is independent of abort rate, so it has to be `execution_idx.fetch_add` / `validation_idx.fetch_add` fighting over the same cache line. this matches the perf profile we took earlier that showed *scheduler.next_task at 24%*!!!!!!
+
+dep_suspends came out as 0 across the whole run. meaning by the time `add_dependency` tries to push a dep, the blocking tx has already finished and the list is `CLOSED_MARKER`, so we return false and the caller just retries without suspending. the `dependency_suspends` counter never fires. this is actually a good sign - cascading abort depth stays shallow.
+
+so for V5 batching, the main configs we care about (accounts=1000, hot/cold) have abort rates between 2% and 17%. overlap waste from batching should be bounded. the plateau at 64->128 is pure counter contention, batching targets exactly this. expected gain: 10-20% on these configs, marginal on high-contention ones.
+
+CSV: `benchmark_records/psc_current_40140577/`

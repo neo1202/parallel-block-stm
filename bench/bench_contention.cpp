@@ -85,10 +85,7 @@ static double measure_parallel_ms(
     auto start = std::chrono::steady_clock::now();
     auto result = parallel_execute(block, initial_state, num_threads);
     auto end = std::chrono::steady_clock::now();
-
-    // Prevent compiler from optimizing away the result
     if (result.empty()) std::abort();
-
     return std::chrono::duration<double, std::milli>(end - start).count();
 }
 

@@ -1,18 +1,5 @@
-// bench_blocksize.cpp - Block size sweep benchmark
-//
-// Measures throughput across different block sizes.
-// Larger blocks amortize scheduling overhead.
-//
-// Usage:
-//   ./bench_blocksize [options]
-//
-// Options:
-//   --threads      Thread count                       (default: 1)
-//   --block-sizes  Comma-separated block sizes        (default: 100,500,1000,5000,10000,50000)
-//   --accounts     Number of accounts                 (default: 1000)
-//   --seed         Random seed                        (default: 42)
-//   --runs         Repetitions per config (median)    (default: 5)
-//
+// bench_blocksize.cpp - sweep block size, see how scheduling overhead amortizes.
+// `--help` for flags.
 
 #include "transaction.h"
 #include "workload.h"
@@ -82,10 +69,7 @@ static double measure_parallel_ms(
     auto start = std::chrono::steady_clock::now();
     auto result = parallel_execute(block, initial_state, num_threads);
     auto end = std::chrono::steady_clock::now();
-
-    // Prevent compiler from optimizing away the result
     if (result.empty()) std::abort();
-
     return std::chrono::duration<double, std::milli>(end - start).count();
 }
 

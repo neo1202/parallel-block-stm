@@ -17,42 +17,60 @@
 #include <unordered_map>
 #include <thread>
 
+// aggregate stats for the whole block. derive abort rate etc. from these.
+struct BlockStats {
+    uint64_t validation_aborts = 0;
+    uint64_t dependency_suspends = 0;
+    uint64_t total_executions = 0;   // includes re-executions
+};
+
 inline std::unordered_map<Key, Value> parallel_execute(
     const std::vector<Transaction>& block,
     const std::unordered_map<Key, Value>& initial_state,
-    int num_threads
+    int num_threads,
+    BlockStats* out_stats = nullptr   // optional, nullptr -> don't collect
 ) {
     if (block.empty()) {
+        if (out_stats) *out_stats = {};
         return initial_state;
     }
 
     size_t block_size = block.size();
 
-    // 1. Initialize shared structures for this block
     MVMemory memory(block_size, initial_state);
     Scheduler scheduler(block_size);
 
-    // 2. Spawn worker threads
+    // one ExecStats per worker. each worker writes only to its own slot for lower contention
+    std::vector<ExecStats> per_thread_stats;
+    if (out_stats) per_thread_stats.resize(num_threads);
+
     std::vector<std::thread> threads;
     threads.reserve(num_threads);
 
     for (int i = 0; i < num_threads; ++i) {
-        threads.emplace_back([&scheduler, &memory, &block, &initial_state]() {
-            Executor executor(scheduler, memory, block, initial_state);
+        ExecStats* slot = out_stats ? &per_thread_stats[i] : nullptr;
+        threads.emplace_back([&scheduler, &memory, &block, &initial_state, slot]() {
+            Executor executor(scheduler, memory, block, initial_state, slot);
             executor.run();
         });
     }
 
-    // 3. Wait for the scheduler to mark done() and threads to exit
     for (auto& t : threads) {
         t.join();
     }
 
-    // 4. Collect final state
-    // Start with a copy of the initial state, as transactions may not write to all keys
+    // sum per-thread stats if requested
+    if (out_stats) {
+        *out_stats = {};
+        for (const auto& s : per_thread_stats) {
+            out_stats->validation_aborts   += s.validation_aborts;
+            out_stats->dependency_suspends += s.dependency_suspends;
+            out_stats->total_executions    += s.total_executions;
+        }
+    }
+
+    // final state = initial + whatever MVMemory's snapshot overwrote
     std::unordered_map<Key, Value> final_state = initial_state;
-    
-    // Merge the snapshot of written values from MVMemory
     auto snapshot = memory.snapshot();
     for (const auto& [k, v] : snapshot) {
         final_state[k] = v;

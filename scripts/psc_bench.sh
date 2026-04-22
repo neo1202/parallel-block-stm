@@ -89,14 +89,16 @@ run_exp_a() {
     mkdir -p "$dir"
     local csv="${dir}/exp_a_contention.csv"
     write_header "$csv" "$ver" "A" "contention sweep, uniform accounts"
-    echo "threads,accounts,time_ms,throughput" >> "$csv"
+    echo "threads,accounts,time_ms,throughput,validation_aborts,dependency_suspends,total_executions,abort_rate,wasted_exec_ratio" >> "$csv"
 
     for acc in 2 10 100 1000 10000; do
+        # bench prints: threads,block_size,accounts,time_ms,throughput,val_aborts,dep_suspends,total_exec,abort_rate,wasted
+        # we drop block_size and substitute in the outer accounts value
         "$binary" --threads $THREADS --block-size $BLOCK \
             --reads $READS --writes $WRITES --compute $COMPUTE --runs $RUNS \
             --accounts $acc \
             | tail -n +2 \
-            | awk -F, -v a=$acc 'NF{print $1","a","$4","$5}' \
+            | awk -F, -v a=$acc 'NF{print $1","a","$4","$5","$6","$7","$8","$9","$10}' \
             >> "$csv"
     done
     echo "  [A/${ver}] -> $csv"
@@ -108,14 +110,14 @@ run_exp_b() {
     mkdir -p "$dir"
     local csv="${dir}/exp_b_hotcold.csv"
     write_header "$csv" "$ver" "B" "dex-style hot/cold, 1000 accounts (50 hot), hot_tx_ratio=${HOT_RATIO}"
-    echo "threads,accounts,time_ms,throughput" >> "$csv"
+    echo "threads,accounts,time_ms,throughput,validation_aborts,dependency_suspends,total_executions,abort_rate,wasted_exec_ratio" >> "$csv"
 
     "$binary" --threads $THREADS --block-size $BLOCK \
         --reads $READS --writes $WRITES --compute $COMPUTE --runs $RUNS \
         --accounts 1000 \
         --hot-tx-ratio $HOT_RATIO --hot-accounts $HOT_ACCOUNTS --hot-keys $HOT_KEYS \
         | tail -n +2 \
-        | awk -F, 'NF{print $1","$3","$4","$5}' \
+        | awk -F, 'NF{print $1","$3","$4","$5","$6","$7","$8","$9","$10}' \
         >> "$csv"
     echo "  [B/${ver}] -> $csv"
 }

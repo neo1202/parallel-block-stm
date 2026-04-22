@@ -14,6 +14,13 @@
 #include <optional>
 #include <thread>
 
+// per-thread counters. aligned to a cache line
+struct alignas(64) ExecStats {
+    uint64_t validation_aborts = 0;    // try_validation_abort succeeded
+    uint64_t dependency_suspends = 0;  // hit ESTIMATE -> suspended on a dep
+    uint64_t total_executions = 0;     // every finish_execution
+};
+
 // context = 「你在什麼環境下操作」 決定了同一段邏輯在不同環境下的行為
 class ParallelContext : public ExecutionContext {
     MVMemory& memory_;
@@ -88,13 +95,16 @@ class Executor {
     MVMemory& memory_;
     const std::vector<Transaction>& block_;
     const std::unordered_map<Key, Value>& initial_state_;
+    ExecStats* stats_;   // nullable, benchmarks set this; tests leave null
 
 public:
     Executor(Scheduler& scheduler,
              MVMemory& memory,
              const std::vector<Transaction>& block,
-             const std::unordered_map<Key, Value>& initial_state)
-        : scheduler_(scheduler), memory_(memory), block_(block), initial_state_(initial_state) {}
+             const std::unordered_map<Key, Value>& initial_state,
+             ExecStats* stats = nullptr)
+        : scheduler_(scheduler), memory_(memory), block_(block), initial_state_(initial_state),
+          stats_(stats) {}
 
     // --- Algorithm 1: Thread Main Loop ---
     void run() {
@@ -131,20 +141,21 @@ private:
         // 2. Handle read dependency (ESTIMATE encountered)
         if (ctx.has_error()) {
             if (!scheduler_.add_dependency(txn_idx, ctx.get_blocking_txn_idx())) {
-                // Dependency was resolved while we were trying to add it!
-                // Re-execute immediately without waiting.
+                // blocking tx already finished; caller retries without suspending
                 return Task{version, TaskKind::EXECUTION_TASK};
             }
-            return std::nullopt; // Successfully suspended
+            if (stats_) stats_->dependency_suspends++;
+            return std::nullopt;
         }
-        
+
         // 3. Execution succeeded, record write-set to shared memory
         bool wrote_new_location = memory_.record(
-            version, 
-            ctx.take_read_set(), 
+            version,
+            ctx.take_read_set(),
             ctx.take_write_set()
         );
-        
+        if (stats_) stats_->total_executions++;
+
         // 4. Update scheduler status and potentially get a validation task back
         return scheduler_.finish_execution(txn_idx, version.incarnation, wrote_new_location);
     }
@@ -161,6 +172,7 @@ private:
         if (!read_set_valid) {
             aborted = scheduler_.try_validation_abort(txn_idx, version.incarnation);
             if (aborted) {
+                if (stats_) stats_->validation_aborts++;
                 // 3. Successful abort: mark writes as ESTIMATE to warn higher txns
                 memory_.convert_writes_to_estimates(txn_idx);
             }

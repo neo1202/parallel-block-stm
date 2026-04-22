@@ -1,7 +1,5 @@
 // bench_scaling.cpp - Thread scaling benchmark
 //
-// Measures execution time across different thread counts for a fixed workload.
-// Currently runs sequential baseline only (parallel added in Phase 4).
 //
 // Usage:
 //   ./bench_scaling [options]
@@ -15,13 +13,10 @@
 //
 // Examples:
 //   ./bench_scaling
-//   ./bench_scaling --block-size 5000 --accounts 100 --seed 99
 //   ./bench_scaling --threads 1,2,4,8 --block-size 10000 --accounts 1000
 //
-// Output: CSV to stdout (pipe to file with > results.csv)
-//
 /*
-t == 1 時跑的是真的 sequential_execute（Line 139），不是 parallel 開 1 個 thread。這是正確的做法：
+t == 1 時跑的是真的 sequential_execute, 不是 parallel 開 1 個 thread
 
 threads=1  -> sequential_execute()     <- 純 sequential，沒有 MVMemory/Scheduler
 threads=2+ -> parallel_execute(t)      <- parallel 版，有全部 overhead
@@ -46,7 +41,6 @@ speedup = threads=1 的時間 / threads=8 的時間
 #include <string>
 #include <vector>
 
-// --- Parse comma-separated integers (e.g., "1,2,4,8") ---
 static std::vector<int> parse_int_list(const std::string& s) {
     std::vector<int> result;
     std::istringstream stream(s);
@@ -57,7 +51,6 @@ static std::vector<int> parse_int_list(const std::string& s) {
     return result;
 }
 
-// --- Simple argument parser ---
 struct BenchConfig {
     std::vector<int> threads = {1};
     size_t block_size = 10000;
@@ -97,7 +90,7 @@ static BenchConfig parse_args(int argc, char* argv[]) {
     return cfg;
 }
 
-// --- Measure sequential execution time (milliseconds) ---
+//Measure sequential execution time (milliseconds)
 static double measure_sequential_ms(
     const std::vector<Transaction>& block,
     const std::unordered_map<Key, Value>& initial_state
@@ -112,14 +105,15 @@ static double measure_sequential_ms(
     return std::chrono::duration<double, std::milli>(end - start).count();
 }
 
-// --- Measure parallel execution time (milliseconds) ---
+// Measure parallel execution time 
 static double measure_parallel_ms(
     const std::vector<Transaction>& block,
     const std::unordered_map<Key, Value>& initial_state,
-    int num_threads
+    int num_threads,
+    BlockStats* out_stats = nullptr
 ) {
     auto start = std::chrono::steady_clock::now();
-    auto result = parallel_execute(block, initial_state, num_threads);
+    auto result = parallel_execute(block, initial_state, num_threads, out_stats);
     auto end = std::chrono::steady_clock::now();
 
     // Prevent compiler from optimizing away the result
@@ -128,7 +122,6 @@ static double measure_parallel_ms(
     return std::chrono::duration<double, std::milli>(end - start).count();
 }
 
-// --- Compute median of a vector ---
 static double median(std::vector<double>& v) {
     std::sort(v.begin(), v.end());
     size_t n = v.size();
@@ -139,7 +132,7 @@ static double median(std::vector<double>& v) {
 int main(int argc, char* argv[]) {
     auto cfg = parse_args(argc, argv);
 
-    // Generate workload once (reused across all runs)
+    // same workload used for every run, so timings are directly comparable
     WorkloadConfig wl_cfg{
         .num_txs = cfg.block_size,
         .num_accounts = cfg.accounts,
@@ -154,30 +147,47 @@ int main(int argc, char* argv[]) {
     auto block = generate_workload(wl_cfg);
     auto initial_state = generate_initial_state(cfg.accounts);
 
-    // Print CSV header
-    std::cout << "threads,block_size,total_accounts,time_ms,throughput\n";
+    // stats 抓的是最後一 run 的，time_ms 是所有 run 的 median
+    std::cout << "threads,block_size,total_accounts,time_ms,throughput,"
+                 "validation_aborts,dependency_suspends,total_executions,"
+                 "abort_rate,wasted_exec_ratio\n";
 
     for (int t : cfg.threads) {
         std::vector<double> times;
         times.reserve(cfg.runs);
+        BlockStats last_stats{};
 
         for (int r = 0; r < cfg.runs; ++r) {
             if (t == 1) {
-                // Sequential baseline
                 times.push_back(measure_sequential_ms(block, initial_state));
             } else {
-                times.push_back(measure_parallel_ms(block, initial_state, t));
+                BlockStats s{};
+                times.push_back(measure_parallel_ms(block, initial_state, t, &s));
+                last_stats = s;
             }
         }
 
         double med_ms = median(times);
         double tps = (cfg.block_size / med_ms) * 1000.0;
 
+        double abort_rate = (cfg.block_size > 0)
+            ? static_cast<double>(last_stats.validation_aborts) / cfg.block_size : 0.0;
+        double wasted = 0.0;
+        if (last_stats.total_executions > cfg.block_size) {
+            wasted = static_cast<double>(last_stats.total_executions - cfg.block_size)
+                   / static_cast<double>(last_stats.total_executions);
+        }
+
         std::cout << t << ","
                   << cfg.block_size << ","
                   << cfg.accounts << ","
                   << med_ms << ","
-                  << tps << "\n";
+                  << tps << ","
+                  << last_stats.validation_aborts << ","
+                  << last_stats.dependency_suspends << ","
+                  << last_stats.total_executions << ","
+                  << abort_rate << ","
+                  << wasted << "\n";
     }
 
     return 0;

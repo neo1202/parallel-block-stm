@@ -32,8 +32,8 @@ struct Task {
 
 // Per-tx status: (incarnation, status) packed into one 64-bit atomic so the
 // transition READY -> EXECUTING -> EXECUTED -> ABORTING -> READY(i+1) can
-// CAS both fields at once. alignas(64) is required - without it multiple
-// TxnStatusEntry share a cache line and CAS traffic tanks throughput.
+// CAS both fields at once. alignas(64) is required. without it multiple
+// TxnStatusEntry share a cache line and CAS traffic burst
 enum class TxnStatus {
     READY_TO_EXECUTE,
     EXECUTING,
@@ -57,7 +57,7 @@ struct alignas(64) TxnStatusEntry {
     }
 };
 
-// Per-tx dependency set: Treiber stack.
+// Per-tx dependency set
 struct DepNode {
     size_t txn_idx;
     DepNode* next;
@@ -135,7 +135,7 @@ public:
         }
     }
 
-    // --- Algorithm 4, Line 101-102: done() ---
+    // Algorithm 4, Line 101-102
     bool done() const {
         return done_marker_.load(std::memory_order_acquire);
     }
@@ -144,7 +144,6 @@ public:
         return num_active_tasks_.value;
     }
 
-    // --- Algorithm 4, Line 137-146: next_task() ---
     // thread 主迴圈呼叫，決定要拿執行任務還是驗證任務
     // Pick the next task to perform. Validation tasks are prioritized
     // (lower idx first). Returns nullopt if no task is available.
@@ -170,7 +169,6 @@ public:
         return std::nullopt;
     }
 
-    // --- Algorithm 5, Line 147-154: add_dependency() ---
     // 登記 tx_k 依賴 tx_j，等 tx_j 跑完再叫醒 tx_k
     // Record that txn_idx depends on blocking_txn_idx (read ESTIMATE).
     // Returns true if dependency was successfully added.
@@ -180,9 +178,7 @@ public:
         auto& dep = *txn_dependency_[blocking_txn_idx];
 
         // 1. Push first. If CLOSED, blocking already finished its incarnation,
-        //    so the caller can just retry try_execute with the same version.
-        //    we did NOT touch our own status, so the existing EXECUTING(inc)
-        //    is still valid for the retry.
+        //    so the caller can just retry try_execute with the same version.not touch our own status
         auto* new_node = new DepNode(txn_idx);
         DepNode* old_head = dep.head.load(std::memory_order_acquire);
         do {
@@ -196,9 +192,7 @@ public:
 
         // 2. Push succeeded. now mark ourselves ABORTING.
         //    CAS expects EXECUTING(inc). if it fails, resume_dependencies has
-        //    already fired on us (set us to READY+1) - that's fine, we're
-        //    semantically suspended either way; next_task will pick up the
-        //    new incarnation later.
+        //    already set us to READY+1. next_task will pick up the new incarnation later.
         {
             auto& entry = *txn_status_[txn_idx];
             uint64_t expected = entry.state.load(std::memory_order_relaxed);
@@ -217,8 +211,6 @@ public:
         return true;
     }
 
-    // --- Algorithm 5, Line 165-175: finish_execution() ---
-    //
     // Called after try_execute() succeeds. Transitions EXECUTING -> EXECUTED,
     // resumes dependent transactions, and schedules validation.
     // Returns a validation task for the caller if appropriate, or nullopt.
@@ -238,21 +230,14 @@ public:
             entry.state.compare_exchange_strong(expected, desired,
                 std::memory_order_acq_rel);
         }
-
-        // Line 167: Lock-free pop all dependents and close the stack
         DepNode* list = txn_dependency_[txn_idx]->head.exchange(CLOSED_MARKER, std::memory_order_acq_rel);
-
-        // Line 168: resume all dependents
         resume_dependencies(list);
-
-        // Line 169-173: schedule validation (paper's original logic)
         if (validation_idx_.value.load(std::memory_order_acquire)
             > static_cast<int>(txn_idx)) {
             if (wrote_new_location) {
-                // Line 171: decrease validation_idx to txn_idx
                 decrease_validation_idx(static_cast<int>(txn_idx));
             } else {
-                // Line 173: return validation task directly to caller
+                // return validation task directly to caller
                 return Task{{txn_idx, incarnation}, TaskKind::VALIDATION_TASK};
             }
         }
@@ -261,7 +246,6 @@ public:
         return std::nullopt;
     }
 
-    // --- Algorithm 5, Line 176-181: try_validation_abort() ---
     // Attempt to abort a transaction after validation failure.
     // Only the first thread to see (incarnation, EXECUTED) succeeds.
     // Returns true if this thread performed the abort.
@@ -269,24 +253,18 @@ public:
         auto& entry = *txn_status_[txn_idx];
         uint64_t expected = TxnStatusEntry::pack(static_cast<uint32_t>(incarnation), TxnStatus::EXECUTED);
         uint64_t desired = TxnStatusEntry::pack(static_cast<uint32_t>(incarnation), TxnStatus::ABORTING);
-        // Line 178-179: Only the first thread to see (incarnation, EXECUTED) succeeds
+        // !Only the first thread to see (incarnation, EXECUTED) succeeds
         return entry.state.compare_exchange_strong(expected, desired, std::memory_order_acq_rel);
     }
 
-    // --- Algorithm 5, Line 182-191: finish_validation() ---
-    //
     // Called after validation completes. If aborted, schedule re-execution
     // for this tx and re-validation for higher txs.
     // Returns an execution task for the caller if appropriate, or nullopt.
     std::optional<Task> finish_validation(size_t txn_idx, bool aborted) {
         if (aborted) {
-            // Line 184: ABORTING -> READY_TO_EXECUTE(incarnation+1)
             set_ready_status(txn_idx);
-
-            // Line 185: schedule validation for higher transactions
             decrease_validation_idx(static_cast<int>(txn_idx) + 1);
-
-            // Line 186-189: schedule re-execution for this tx
+            // schedule re-execution for this tx
             if (execution_idx_.value.load(std::memory_order_acquire)
                 > static_cast<int>(txn_idx)) {
                 auto ver = try_incarnate(static_cast<int>(txn_idx));
@@ -301,7 +279,6 @@ public:
     }
 
 private:
-    // --- Algorithm 4, Line 98-100: decrease_execution_idx() ---
     void decrease_execution_idx(int target_idx) {
         int cur = execution_idx_.value.load(std::memory_order_acquire);
         while (cur > target_idx) {
@@ -313,7 +290,6 @@ private:
         decrease_cnt_.value.fetch_add(1, std::memory_order_acq_rel);
     }
 
-    // --- Algorithm 4, Line 103-105: decrease_validation_idx() ---
     void decrease_validation_idx(int target_idx) {
         int cur = validation_idx_.value.load(std::memory_order_acquire);
         while (cur > target_idx) {
@@ -325,25 +301,23 @@ private:
         decrease_cnt_.value.fetch_add(1, std::memory_order_acq_rel);
     }
 
-    // --- Algorithm 4, Line 106-109: check_done() ---
     void check_done() {
         int observed_cnt = decrease_cnt_.value.load(std::memory_order_acquire);
         int block_sz = static_cast<int>(block_size_);
 
-        // 1. Initial check: counters passed block end AND no active work
+        // Initial check, counters passed block end AND no active work
         if (execution_idx_.value.load(std::memory_order_acquire) < block_sz ||
             validation_idx_.value.load(std::memory_order_acquire) < block_sz ||
             num_active_tasks_.value.load(std::memory_order_acquire) != 0) {
             return;
         }
 
-        // 2. Final confirmation: if decrease_cnt hasn't changed, we are truly done.
+        // Final confirmation, if decrease_cnt hasn't changed, we are truly done.
         if (observed_cnt == decrease_cnt_.value.load(std::memory_order_acquire)) {
             done_marker_.store(true, std::memory_order_release);
         }
     }
 
-    // --- Algorithm 4, Line 110-117: try_incarnate() ---
     std::optional<Version> try_incarnate(int txn_idx) {
         if (txn_idx < static_cast<int>(block_size_)) {
             auto& entry = *txn_status_[txn_idx];
@@ -360,11 +334,10 @@ private:
                 }
             }
         }
-        // Caller is responsible for decrementing num_active_tasks if this returns nullopt
+        // !Caller is responsible for decrementing num_active_tasks if this returns nullopt
         return std::nullopt;
     }
 
-    // --- Algorithm 4, Line 118-124: next_version_to_execute() ---
     std::optional<Version> next_version_to_execute() {
         int block_sz = static_cast<int>(block_size_);
         if (execution_idx_.value.load(std::memory_order_acquire) >= block_sz) {
@@ -384,7 +357,6 @@ private:
         return ver;
     }
 
-    // --- Algorithm 4, Line 125-136: next_version_to_validate() ---
     std::optional<Version> next_version_to_validate() {
         int block_sz = static_cast<int>(block_size_);
         if (validation_idx_.value.load(std::memory_order_acquire) >= block_sz) {
@@ -403,13 +375,10 @@ private:
         return std::nullopt;
     }
 
-    // --- Algorithm 5, Line 155-158: set_ready_status() ---
     // only valid from ABORTING(inc) -> READY(inc+1). called by:
     //   (a) finish_validation when our own validation aborted us
     //   (b) resume_dependencies when blocking finished and we were waiting
-    // both of those guarantee we're in ABORTING. CAS expects exactly that.
-    // if it fails (e.g. resume + finish_validation race on same dep), one of
-    // them already promoted us - that's fine, we're already READY+1.
+    // both guarantee we're in ABORTING status. 
     void set_ready_status(size_t txn_idx) {
         auto& entry = *txn_status_[txn_idx];
         uint64_t expected = entry.state.load(std::memory_order_relaxed);
@@ -423,7 +392,6 @@ private:
         }
     }
 
-    // --- Algorithm 5, Line 159-164: resume_dependencies() ---
     void resume_dependencies(DepNode* list) {
         if (!list || list == CLOSED_MARKER) return;
 

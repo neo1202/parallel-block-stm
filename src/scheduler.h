@@ -83,10 +83,14 @@ struct TxnDependency {
 
 // per-thread claim over a range of execution_idx. we batch the shared
 // fetch_add so 128 threads aren't waiting for  one cache line every task.
+#ifndef EXEC_BATCH
+#define EXEC_BATCH 2
+#endif
+
 struct ExecClaim {
     int lo = 0;
     int hi = 0;
-    static constexpr int BATCH = 2;
+    static constexpr int BATCH = EXEC_BATCH;
 };
 
 // RAII guard for num_active_tasks. Keeps check_done() from firing while

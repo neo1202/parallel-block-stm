@@ -1,9 +1,8 @@
 #pragma once
 
 // executor.h - Algorithm 1 (thread loop) + Algorithm 3 (VM execution).
-// ParallelContext intercepts tx.logic reads/writes: reads go through MVMemory
-// with local write-set check; writes are buffered and only flushed to shared
-// memory at the end via MVMemory.record().
+// tx.logic reads/writes :reads go through MVMemory with local write-set check
+// writes are buffered and only flushed to shared memory at the end via MVMemory.record().
 
 #include "transaction.h"
 #include "mvmemory.h"
@@ -38,7 +37,7 @@ public:
         : memory_(memory), initial_state_(initial_state), txn_idx_(txn_idx) {}
 
     Value read(Key key) override {
-        // 1. Read-Your-Own-Writes (Check local write-set first)
+        // Check local write-set first
         for (auto& wd : write_set_) {
             if (wd.location == key) {
                 return wd.value;
@@ -95,7 +94,7 @@ class Executor {
     MVMemory& memory_;
     const std::vector<Transaction>& block_;
     const std::unordered_map<Key, Value>& initial_state_;
-    ExecStats* stats_;   // nullable, benchmarks set this; tests leave null
+    ExecStats* stats_;   // nullable, benchmarks set this and  tests leave null
 
 public:
     Executor(Scheduler& scheduler,
@@ -109,15 +108,13 @@ public:
     // --- Algorithm 1: Thread Main Loop ---
     void run() {
         std::optional<Task> task = std::nullopt;
-        
-        // Threads loop until check_done() conditions are met
+        ExecClaim claim{};  // per-thread batch state for execution_idx
+
         while (!scheduler_.done()) {
-            // 1. Ask scheduler for the next task if we don't have one
             if (!task) {
-                task = scheduler_.next_task();
+                task = scheduler_.next_task(claim);
             }
-            
-            // 2. Perform the task
+
             if (task) {
                 if (task->kind == TaskKind::EXECUTION_TASK) {
                     task = try_execute(task->version);

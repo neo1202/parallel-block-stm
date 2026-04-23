@@ -81,18 +81,6 @@ struct TxnDependency {
     }
 };
 
-// per-thread claim over a range of execution_idx. we batch the shared
-// fetch_add so 128 threads aren't waiting for  one cache line every task.
-#ifndef EXEC_BATCH
-#define EXEC_BATCH 2
-#endif
-
-struct ExecClaim {
-    int lo = 0;
-    int hi = 0;
-    static constexpr int BATCH = EXEC_BATCH;
-};
-
 // RAII guard for num_active_tasks. Keeps check_done() from firing while
 // a thread is mid-work even if try_execute returns early.
 struct TaskGuard {
@@ -156,38 +144,22 @@ public:
         return num_active_tasks_.value;
     }
 
-    // convenience overload for tests (single-shot, no claim batching)
-    std::optional<Task> next_task() {
-        ExecClaim dummy{};
-        return next_task(dummy);
-    }
-
     // thread 主迴圈呼叫，決定要拿執行任務還是驗證任務
-    // 手上 claim 還有 idx 沒處理 → 先做完我手上的（new）
-    // 手上沒工作了、但 val_idx < exec_idx（表示有 EXECUTED 的 tx 等驗證）→ 驗證優先（paper 原邏輯）
-    // 都沒上面兩個 → CAS 去拿新的一批 exec idx（refill）
-    // claim is per-thread state for batched exec_idx fetch. the loop has three
-    // branches instead of the paper's two. 如果有還沒做完的任務就先做完已領取的
-    //
-    // under extreme contention val<exec stays true forever . aborts keep pulling val_idx back, so without this
-    // priority a thread with pending claim would never fall into the exec branch
-    std::optional<Task> next_task(ExecClaim& claim) {
+    // Pick the next task to perform. Validation tasks are prioritized
+    // (lower idx first). Returns nullopt if no task is available.
+    std::optional<Task> next_task() {
         while (validation_idx_.value.load(std::memory_order_acquire) < static_cast<int>(block_size_) ||
-               execution_idx_.value.load(std::memory_order_acquire) < static_cast<int>(block_size_) ||
-               claim.lo < claim.hi) {
-            if (claim.lo < claim.hi) {
-                auto ver = next_version_to_execute(claim);
-                if (ver.has_value()) {
-                    return Task{*ver, TaskKind::EXECUTION_TASK};
-                }
-            } else if (validation_idx_.value.load(std::memory_order_acquire)
-                       < execution_idx_.value.load(std::memory_order_acquire)) {
+               execution_idx_.value.load(std::memory_order_acquire) < static_cast<int>(block_size_)) {
+            if (validation_idx_.value.load(std::memory_order_acquire)
+                < execution_idx_.value.load(std::memory_order_acquire)) {
+                // Line 139: try validation first
                 auto ver = next_version_to_validate();
                 if (ver.has_value()) {
                     return Task{*ver, TaskKind::VALIDATION_TASK};
                 }
             } else {
-                auto ver = next_version_to_execute(claim);
+                // Line 143: try execution
+                auto ver = next_version_to_execute();
                 if (ver.has_value()) {
                     return Task{*ver, TaskKind::EXECUTION_TASK};
                 }
@@ -366,45 +338,23 @@ private:
         return std::nullopt;
     }
 
-    // batched: claim [lo, hi) chunks via CAS clamped to block_size, then walk
-    // through them locally. one shared-counter touch per BATCH instead of per task.
-    //
-    // num_active_tasks accounting: on refill we reserve (hi - lo) slots. each
-    // consumed idx gives one slot back - either via the caller's finish_* (on
-    // success) or via local -- (on try_incarnate fail). total balance is zero
-    // per refill. keeping slots reserved while claim is non-empty prevents
-    // check_done() from racing ahead while the thread still has pending work.
-    std::optional<Version> next_version_to_execute(ExecClaim& claim) {
+    std::optional<Version> next_version_to_execute() {
         int block_sz = static_cast<int>(block_size_);
-
-        if (claim.lo >= claim.hi) {
-            // refill via CAS. upper bound the block_size so counter never overshoots
-            int cur = execution_idx_.value.load(std::memory_order_acquire);
-            while (cur < block_sz) {
-                int new_val = std::min(cur + ExecClaim::BATCH, block_sz);
-                if (execution_idx_.value.compare_exchange_weak(
-                        cur, new_val, std::memory_order_acq_rel)) {
-                    claim.lo = cur;
-                    claim.hi = new_val;
-                    num_active_tasks_.value.fetch_add(new_val - cur,
-                        std::memory_order_acq_rel);
-                    break;
-                }
-                // CAS failure: cur reloaded by compare_exchange_weak, loop again:(
-            }
-            if (claim.lo >= claim.hi) return std::nullopt;
+        if (execution_idx_.value.load(std::memory_order_acquire) >= block_sz) {
+            return std::nullopt;
         }
-
-        while (claim.lo < claim.hi) {
-            int idx = claim.lo++;
-            auto ver = try_incarnate(idx);
-            if (ver.has_value()) {
-                return ver;
-            }
-            // try_incarnate failed (status not READY), skip and release slot
+        num_active_tasks_.value.fetch_add(1, std::memory_order_acq_rel);
+        int idx = execution_idx_.value.fetch_add(1, std::memory_order_acq_rel);
+        if (idx >= block_sz) {
+            num_active_tasks_.value.fetch_sub(1, std::memory_order_acq_rel);
+            return std::nullopt;
+        }
+        
+        auto ver = try_incarnate(idx);
+        if (!ver.has_value()) {
             num_active_tasks_.value.fetch_sub(1, std::memory_order_acq_rel);
         }
-        return std::nullopt;
+        return ver;
     }
 
     std::optional<Version> next_version_to_validate() {

@@ -21,6 +21,7 @@ why 2r/2w + compute instead of diem's actual 21r/4w: real diem's 21 reads are mo
 - **V2-lfchain-backoff** - V1 + exponential backoff on CAS failure
 - **V3-lfsched** - V2 + LF scheduler (bit-packed status + Treiber-stack deps)
 - **V4-arena** - V2 + per-block arena allocator for ChainNode
+- **V5-exec-batch** - V4 + batched execution_idx claims (per-thread ExecClaim of K idx per CAS). *abandoned*, see log entry below
 
 ## two experiments, run per version
 
@@ -296,3 +297,37 @@ dep_suspends came out as 0 across the whole run. meaning by the time `add_depend
 so for V5 batching, the main configs we care about (accounts=1000, hot/cold) have abort rates between 2% and 17%. overlap waste from batching should be bounded. the plateau at 64->128 is pure counter contention, batching targets exactly this. expected gain: 10-20% on these configs, marginal on high-contention ones.
 
 CSV: `benchmark_records/psc_current_40140577/`
+
+---
+
+### 2026-04-22, V5 attempt: batch execution_idx claims (negative result)
+
+based on the V4 baseline analysis, new idea:each thread CAS-claims a range `[lo, hi)` of exec_idx at once and iterates locally, so the shared counter gets hit once per BATCH instead of once per task.
+
+PSC results below.
+**BATCH sweep at 128 threads:**
+
+| BATCH        | accounts=1000 | accounts=10000 | hot/cold |
+----------------------------------------------------------------------------------
+| V4 (no batch)| 204,024       | 234,864        | 232,570  |
+| B=2          | **229,445** | 229,831   | 211,161 |
+| B=3          | 195,087       | **246,343** | 211,103 |
+| B=4          | 189,021       | 216,280        | 197,240  |
+| B=5          | 187,174       | 216,872        | 176,705  |
+| B=6          | 180,031       | 194,570        | 183,378  |
+| B=8          | 165,984       | 205,607        | 170,938  |
+
+
+we targeted the wrong thing. the -fno-inline profile showed scheduler.next_task at 24%, but breaking that down:
+- `next_version_to_validate` was 12% (validation counter)
+- `next_version_to_execute` was only 5.5% (execution counter, what we batched)
+
+so even if batching drove the exec counter cost to zero we'd only save ~5%. meanwhile batching came with a side effect: when a thread holds a claim, it's draining execution tasks back-to-back and doing no validation work. validator progress falls behind, conflicts get caught late, aborts cascade. the abort rate went up across the board:
+- V4 accounts=1000: 17% abort rate
+- V5 B=2 accounts=1000: 20% abort rate
+- V5 B=8 accounts=1000: 29% abort rate
+
+and the larger BATCH is, the worse validator starvation gets.
+
+**decision**: abandon V5. V4 stays as the final version.
+CSV: `benchmark_records/psc_current_40178058/` (B=2), `benchmark_records/psc_sweep_40178681/` (B=3,4,5,6)

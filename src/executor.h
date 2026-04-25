@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <optional>
 #include <thread>
+#include <immintrin.h>
 
 // per-thread counters. aligned to a cache line
 struct alignas(64) ExecStats {
@@ -108,21 +109,33 @@ public:
 
     // --- Algorithm 1: Thread Main Loop ---
     void run() {
-        std::optional<Task> task = std::nullopt;
+        std::vector<Task> local_queue;
+        local_queue.reserve(8); // small local queue for tasks pulled from scheduler
         
         // Threads loop until check_done() conditions are met
         while (!scheduler_.done()) {
             // 1. Ask scheduler for the next task if we don't have one
-            if (!task) {
-                task = scheduler_.next_task();
+            if (local_queue.empty()) {
+                scheduler_.next_task(local_queue, 4); // try to get a batch of tasks
             }
             
+            if (local_queue.empty()) {
+                // No task available, yield to reduce contention and check done conditions
+                _mm_pause(); // hint the CPU we're in a spin-wait
+                continue;
+            }
             // 2. Perform the task
-            if (task) {
-                if (task->kind == TaskKind::EXECUTION_TASK) {
-                    task = try_execute(task->version);
+            while (!local_queue.empty()) {
+                Task task = local_queue.back();
+                local_queue.pop_back();
+                std::optional<Task> next_task;
+                if (task.kind == TaskKind::EXECUTION_TASK) {
+                    next_task = try_execute(task.version);
                 } else {
-                    task = needs_reexecution(task->version);
+                    next_task = needs_reexecution(task.version);
+                }
+                if (next_task) {
+                    local_queue.push_back(*next_task);
                 }
             }
         }

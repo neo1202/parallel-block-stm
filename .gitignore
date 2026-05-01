@@ -17,6 +17,7 @@ obj/
 
 # IDE
 .vscode/
+.venv/
 .idea/
 *.swp
 *.swo
@@ -42,3 +43,7 @@ node_modules/
 # Python & Benchmarks
 venv/
 benchmark_records/
+
+*.png
+# drawing scripts
+scripts/*.py

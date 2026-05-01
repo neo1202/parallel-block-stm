@@ -147,26 +147,64 @@ public:
     // thread 主迴圈呼叫，決定要拿執行任務還是驗證任務
     // Pick the next task to perform. Validation tasks are prioritized
     // (lower idx first). Returns nullopt if no task is available.
-    std::optional<Task> next_task() {
-        while (validation_idx_.value.load(std::memory_order_acquire) < static_cast<int>(block_size_) ||
-               execution_idx_.value.load(std::memory_order_acquire) < static_cast<int>(block_size_)) {
-            if (validation_idx_.value.load(std::memory_order_acquire)
-                < execution_idx_.value.load(std::memory_order_acquire)) {
-                // Line 139: try validation first
-                auto ver = next_version_to_validate();
-                if (ver.has_value()) {
-                    return Task{*ver, TaskKind::VALIDATION_TASK};
+    // V6:
+    // Can assign a batch of tasks to the caller if the validation idx is far behind.
+    // Will push tasks into local_queue from executor
+    void next_task(std::vector<Task>& local_queue, int batch_size) {
+        int block_sz = static_cast<int>(block_size_);
+
+        while (!done()) {
+            int exec_idx = execution_idx_.value.load(std::memory_order_acquire);
+            int val_idx = validation_idx_.value.load(std::memory_order_acquire);
+
+            // If both idx are assigned, check done and return.
+            if (exec_idx >= block_sz && val_idx >= block_sz) {
+                check_done();
+                return;
+            }
+
+            if (val_idx < exec_idx) {
+                // prioritize validation with batch
+                int to_claim = std::min(batch_size, exec_idx - val_idx);
+                if (to_claim <= 0) continue;  // someone else beat us to it, re-check indices
+                int start_idx = validation_idx_.value.fetch_add(to_claim, std::memory_order_acq_rel);
+                int count_not_pushed = 0;
+                // reserve num active tasks with all batch tasks.
+                num_active_tasks_.value.fetch_add(to_claim, std::memory_order_acq_rel);
+                // push task into local queue in reverse order so the lowest idx gets popped first.
+                for (int i = to_claim - 1; i >= 0; --i) {
+                    int idx = start_idx + i;
+                    if (idx < block_sz) {
+                        auto& entry = *txn_status_[idx];
+                        auto [inc, st] = TxnStatusEntry::unpack(entry.state.load(std::memory_order_acquire));
+                        if (st == TxnStatus::EXECUTED) {
+                            local_queue.push_back(Task{{static_cast<size_t>(idx), inc}, TaskKind::VALIDATION_TASK});
+                        } else {
+                            // if not EXECUTED, release the reserved active task slot
+                            count_not_pushed++;
+                        }
+                    } else {
+                        // if idx out of range, release the reserved active task slot
+                        count_not_pushed++;
+                    }
                 }
+                // batch loop done, now decrease the active task count for any tasks we couldn't push (validation not ready or idx out of range)
+                if (count_not_pushed > 0) {
+                    num_active_tasks_.value.fetch_sub(count_not_pushed, std::memory_order_acq_rel);
+                }
+
+                if (!local_queue.empty()) {
+                    return;
+                }
+
             } else {
-                // Line 143: try execution
                 auto ver = next_version_to_execute();
                 if (ver.has_value()) {
-                    return Task{*ver, TaskKind::EXECUTION_TASK};
+                    local_queue.push_back(Task{*ver, TaskKind::EXECUTION_TASK});
+                    return;
                 }
             }
         }
-        check_done();
-        return std::nullopt;
     }
 
     // 登記 tx_k 依賴 tx_j，等 tx_j 跑完再叫醒 tx_k

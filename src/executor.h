@@ -116,9 +116,9 @@ public:
         while (!scheduler_.done()) {
             // 1. Ask scheduler for the next task if we don't have one
             if (local_queue.empty()) {
-                scheduler_.next_task(local_queue, 4); // try to get a batch of tasks
+                scheduler_.next_task(local_queue, 1); // try to get a batch of tasks
             }
-            
+
             if (local_queue.empty()) {
                 // No task available, yield to reduce contention and check done conditions
                 _mm_pause(); // hint the CPU we're in a spin-wait

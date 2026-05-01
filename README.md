@@ -48,6 +48,12 @@ make -j$(nproc)
 ./build/test/test_blockstm
 ./build/bench/bench_scaling --threads 8 --block-size 10000 --accounts 1000
 ```
+## Third-party Libraries
+
+This project utilizes the following open-source libraries:
+
+**[Picosha2](https://github.com/okmidas/picosha2)** - A lightweight, header-only SHA256 library for C++. Used in `src/workload.h` to simulate computational workload within transactions and ensure realistic execution timing. (Licensed under the MIT License)
+**[doctest](https://github.com/doctest/doctest)** - The fastest light-weight C++ single-header testing framework for unit tests. (Licensed under the MIT License)
 
 ## References
 

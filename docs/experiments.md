@@ -331,3 +331,41 @@ and the larger BATCH is, the worse validator starvation gets.
 
 **decision**: abandon V5. V4 stays as the final version.
 CSV: `benchmark_records/psc_current_40178058/` (B=2), `benchmark_records/psc_sweep_40178681/` (B=3,4,5,6)
+
+---
+
+### 2026-04-25, V6: Validation Batching & Local Queue (The Final Architecture)
+
+After abandoning V5, we reconsidered the bottleneck at 128 threads for realistic workloads (low contention: accounts=1000, 10000, and hot/cold). The `perf -fno-inline` profile showed `Scheduler::next_task` taking ~24% of the time, largely driven by `next_version_to_validate` (12%). 
+
+To address this, we implemented V6: introducing a `local_queue` in the executor to decouple task fetching from execution, and attempting to batch validation task claims to reduce cache-line contention on `validation_idx_`.
+
+We iteratively refined V6 through several experiments at 128 threads to understand the micro-architectural impact.
+
+#### 1. V6-B4 (Batch=4) with `fetch_add`
+We initially used `fetch_add(4)` to claim validation tasks in chunks.
+- **Result**: At 64 threads, TPS hit a new high of **240,870** (vs 219k baseline). However, at 128 threads, TPS collapsed to **206,017** (vs 226k baseline).
+- **Analysis**: 128 threads blindly pushing `validation_idx_` forward caused severe "overshoot." Threads fetched tasks that weren't `EXECUTED` yet, skipped them, and later triggered expensive `decrease_validation_idx` rollback ping-pong loops. 
+
+#### 2. V6-CAS (Batch=4) with `compare_exchange_weak`
+To prevent overshoot, we replaced `fetch_add` with a strict CAS loop ensuring `validation_idx_` never exceeds `execution_idx_`.
+- **Result**: Performance worsened. 64t dropped to 217k; 128t dropped to 221k.
+- **Analysis**: Solved the logical overshoot but introduced a hardware "CAS contention storm." At 128 cores, 1 thread succeeds while 127 spin and retry, wasting massive CPU cycles and memory bandwidth.
+
+#### 3. V6-B1 (Batch=1) with `fetch_add(1)` and `local_queue`
+Realizing batching caused either overshoot or CAS storms, we reverted to `fetch_add(1)` to eliminate overshoot, but **kept the `local_queue` architecture** to decouple fetching and execution.
+- **Result**: 128t TPS skyrocketed to an all-time high of **253,792** (at accounts=10000). 64t remained strong at 228k.
+- **Analysis**: The `local_queue` restructuring provided a "micro-architecture bonus." Separating the `next_task` fetch logic from the `try_execute` logic improved the CPU's Instruction Pipeline flow and I-Cache hit rate. 
+
+#### 4. V6-B1 without `_mm_pause()` (Control Experiment)
+To verify if the `_mm_pause()` in the busy-wait loop was responsible for the 128t success, we removed it.
+- **Result**: 128t TPS plummeted from 253k back to 222k. 64t remained unchanged (228k).
+- **Analysis**: At extreme 128-core contention, hardware-level "micro-backoff" is mandatory. `_mm_pause()` allows Hyper-Threading to yield resources and slightly spaces out Memory Bus requests, preventing cache-line bouncing gridlock.
+
+#### Final Conclusion (V3/V6 vs Mutex Approach)
+We confirmed our starting point, the lock-free scheduler (V3) combined with the V6 local queue architecture, is the optimal approach for realistic scenarios. While the mutex-based approach can perform slightly better under pathological extreme data contention (e.g., accounts=2) due to adaptive thread blocking, it severely limits throughput in realistic workloads (low contention and hot/cold). V6 dominates these realistic scenarios by maximizing parallel efficiency.
+
+**Final Architecture**: `local_queue` decoupling + `fetch_add(1)` safe fetching + `_mm_pause()` hardware backoff.
+**Performance Profiles (`perf`)**: V6 profiles show `Scheduler::next_task` overhead drops to just ~2% of execution time (down from the massive overhead in earlier versions), allowing >93% of CPU time to be spent purely in `try_execute`.
+
+CSVs: `benchmark_records/psc_current_40284508_v6-2/` (B4), `benchmark_records/psc_current_40295201/` (B1), `benchmark_records/psc_current_40295536/` (CAS), `benchmark_records/psc_current_40295869/` (B1 no-pause).

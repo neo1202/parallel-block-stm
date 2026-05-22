@@ -28,7 +28,7 @@ venv/
 .DS_Store
 Thumbs.db
 
-# Papers, keep locally
+# Papers & reports
 docs/papers/*.pdf
 
 # Data / Benchmark output

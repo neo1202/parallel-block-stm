@@ -761,9 +761,18 @@
 
     <!-- ──── FINAL REPORT ──── -->
     <div class="tab-panel" id="report">
-      <div class="placeholder">
-        <div class="placeholder-icon">&#9671;</div>
-        <p>Final report will be posted here after April 30th.</p>
+      <div class="prose">
+        <h2>Final Report</h2>
+        <p>Parallel Block-STM: A lock-free optimistic concurrency control engine for ordered transaction execution.</p>
+
+        <h3>Deliverables</h3>
+        <ul>
+          <li><strong><a href="reports/Final Report Parallel Block-STM.pdf" style="color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent);">Final Report (PDF)</a></strong> — Complete write-up: design, implementation, evaluation, and results.</li>
+          <li><strong><a href="reports/experiments.md" style="color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent);">Experiment Notes (Markdown)</a></strong> — Detailed working notes on all benchmarks, configurations, and findings.</li>
+        </ul>
+
+        <h3>Summary</h3>
+        <p>We implemented a fully-functional Block-STM parallel transaction execution engine in C++20, faithfully reproducing all algorithms from the Gelashvili et al. (PPoPP 2023) paper. Our engine executes blocks of transactions speculatively in parallel across multiple threads using lock-free multi-version memory with atomic operations, dynamic conflict detection, and cascading abort recovery. The system guarantees results identical to sequential execution while providing measurable speedup on multi-threaded systems.</p>
       </div>
     </div>
 
